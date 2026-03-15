@@ -39,7 +39,7 @@ _select: MadVRAspectRatioSelect | None = None
 def _device_state_to_media_player_state(dev_state: PowerState) -> ucapi.media_player.States:
     """
     Convert device power state to media player state.
-    
+
     Mapping:
     - PowerState.ON → States.ON (actively processing video)
     - PowerState.STANDBY → States.STANDBY (low power, network responsive)
@@ -58,7 +58,7 @@ def _device_state_to_media_player_state(dev_state: PowerState) -> ucapi.media_pl
 def _device_state_to_remote_state(dev_state: PowerState) -> ucapi.remote.States:
     """
     Convert device power state to remote state.
-    
+
     Mapping:
     - PowerState.ON or STANDBY → States.ON (device is responsive)
     - PowerState.OFF → States.OFF (device is not responsive)
@@ -136,13 +136,13 @@ async def _initialize_entities():
         _media_player = MadVRMediaPlayer(_config, _device)
         _remote = MadVRRemote(_config, _device)
 
-        # Create sensor entities
+        # Create sensor entities — field order per madVR protocol: GPU, HDMI, CPU, Mainboard
         _sensors = [
             MadVRSignalSensor(_config, _device),
             MadVRTemperatureSensor(_config, _device, 0, "GPU"),
-            MadVRTemperatureSensor(_config, _device, 1, "CPU"),
-            MadVRTemperatureSensor(_config, _device, 2, "Board"),
-            MadVRTemperatureSensor(_config, _device, 3, "PSU"),
+            MadVRTemperatureSensor(_config, _device, 1, "HDMI"),
+            MadVRTemperatureSensor(_config, _device, 2, "CPU"),
+            MadVRTemperatureSensor(_config, _device, 3, "Mainboard"),
             MadVRAspectRatioSensor(_config, _device),
             MadVRMaskingRatioSensor(_config, _device),
         ]
@@ -164,9 +164,9 @@ async def _initialize_entities():
 
         api.available_entities.add(_select)
 
-        await _device.start_polling()
+        await _device.start()
 
-        _LOG.info("✓ Entities initialized successfully")
+        _LOG.info("Entities initialized successfully")
         return True
 
     except Exception as e:
@@ -177,17 +177,17 @@ async def _initialize_entities():
 async def on_setup_complete():
     """Called when setup is complete."""
     _LOG.info("Setup complete - initializing entities")
-    
+
     if await _initialize_entities():
         await api.set_device_state(DeviceStates.CONNECTED)
-        _LOG.info("✓ Device state set to CONNECTED")
+        _LOG.info("Device state set to CONNECTED")
     else:
         await api.set_device_state(DeviceStates.ERROR)
-        _LOG.error("✗ Entity initialization failed")
+        _LOG.error("Entity initialization failed")
 
 
 async def on_connect() -> None:
-    """Handle Remote connection."""
+    """Handle Remote connection. Triggers auto-recovery on reconnect."""
     global _config
 
     _LOG.info("Remote connected")
@@ -206,6 +206,9 @@ async def on_connect() -> None:
     elif not _config.is_configured():
         await api.set_device_state(DeviceStates.DISCONNECTED)
     else:
+        # UC remote reconnected — trigger auto-recovery (reset backoff)
+        if _device:
+            await _device.trigger_reconnect()
         await api.set_device_state(DeviceStates.CONNECTED)
 
 
@@ -220,14 +223,19 @@ async def on_subscribe_entities(entity_ids: list[str]):
 
     for entity_id in entity_ids:
         if _media_player and entity_id == _media_player.id:
-            if _device:
-                await _device.update()
+            # Media player gets state from push notifications automatically
+            pass
         elif _remote and entity_id == _remote.id:
             if _device and api.configured_entities.contains(_remote.id):
                 api.configured_entities.update_attributes(
                     _remote.id,
                     {ucapi.remote.Attributes.STATE: _device_state_to_remote_state(_device.state)}
                 )
+        else:
+            # Check if subscribing to a temperature sensor in on_demand mode
+            if _device and _config and _config.polling_mode == "on_demand":
+                if "temp_" in entity_id:
+                    await _device.query_on_demand()
 
 
 async def main():
@@ -269,7 +277,7 @@ async def main():
         _LOG.error(f"Driver error: {e}", exc_info=True)
     finally:
         if _device:
-            await _device.stop_polling()
+            await _device.stop()
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 {
   "driver_id": "madvr",
-  "version": "1.2.1",
+  "version": "2.0.0",
   "min_core_api": "0.21.0",
   "name": {
     "en": "madVR Envy"
   },
   "description": {
-    "en": "Remote control integration for madVR Envy video processor with complete IP control support"
+    "en": "Remote control integration for madVR Envy video processor via IP control with push notifications"
   },
   "developer": {
     "name": "Meir Miyara",
@@ -27,12 +27,12 @@
         "field": {
           "label": {
             "value": {
-              "en": "This integration provides complete remote control for madVR Envy video processors via IP control. You will be asked to provide the device's IP address and port on the next screen."
+              "en": "This integration connects to the madVR Envy via IP control and receives real-time state updates via push notifications. You will be asked for the device's IP address and port. Optional polling can be configured for data not covered by push notifications (currently temperature)."
             }
           }
         }
       }
     ]
   },
-  "release_date": "2026-02-01"
+  "release_date": "2026-03-15"
 }

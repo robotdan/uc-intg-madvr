@@ -59,6 +59,36 @@ class MadVRSetup:
                         "id": "name",
                         "label": {"en": "Device Name"},
                         "field": {"text": {"value": self._config.name if self._config.name else "madVR Envy"}}
+                    },
+                    {
+                        "id": "polling_mode",
+                        "label": {"en": "Polling Mode"},
+                        "field": {
+                            "dropdown": {
+                                "value": self._config.polling_mode,
+                                "items": [
+                                    {"id": "enabled", "label": {"en": "Enabled (polls at interval)"}},
+                                    {"id": "on_demand", "label": {"en": "On-demand (only when viewing)"}},
+                                    {"id": "disabled", "label": {"en": "Disabled (saves battery)"}},
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        "id": "polling_info",
+                        "label": {"en": ""},
+                        "field": {
+                            "label": {
+                                "value": {
+                                    "en": "Polling is used for data not available via push notifications (currently temperature sensors only). Disabling polling improves battery life. On-demand fetches data only when actively viewing the sensor."
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "id": "polling_interval",
+                        "label": {"en": "Polling Interval (seconds)"},
+                        "field": {"number": {"value": self._config.polling_interval, "min": const.MIN_POLL_INTERVAL}}
                     }
                 ]
             )
@@ -128,12 +158,20 @@ class MadVRSetup:
             else:
                 _LOG.warning("SETUP: Could not fetch MAC address, WOL may not work")
             
-            await test_device.stop_polling()
-            
+            await test_device.stop()
+
             self._config.set_config(host, port, name)
             if test_config.mac_address:
                 self._config.set_mac_address(test_config.mac_address)
-            
+
+            # Save polling configuration
+            polling_mode = input_values.get("polling_mode", "enabled")
+            try:
+                polling_interval = int(input_values.get("polling_interval", str(const.DEFAULT_POLL_INTERVAL)))
+            except (ValueError, TypeError):
+                polling_interval = const.DEFAULT_POLL_INTERVAL
+            self._config.set_polling_config(polling_mode, polling_interval)
+
             _LOG.info("SETUP: Configuration saved successfully")
             _LOG.info("=" * 70)
             return SetupComplete()
@@ -141,7 +179,7 @@ class MadVRSetup:
         except Exception as e:
             _LOG.error("SETUP: Connection test failed: %s", e, exc_info=True)
             try:
-                await test_device.stop_polling()
+                await test_device.stop()
             except Exception:
                 pass
             return SetupError(IntegrationSetupError.CONNECTION_REFUSED)

@@ -50,13 +50,14 @@ class MadVRTemperatureSensor(Sensor):
         Args:
             config: MadVR configuration
             device: MadVR device instance
-            temp_index: Index of temperature value (0=GPU, 1=CPU, 2=Board, 3=PSU)
+            temp_index: Index of temperature value (0=GPU, 1=HDMI, 2=CPU, 3=Mainboard)
             temp_name: Display name for the temperature sensor
         """
         self._device = device
         self._config = config
         self._temp_index = temp_index
 
+        # Protocol field order: 0=GPU, 1=HDMI, 2=CPU, 3=Mainboard
         entity_id = f"sensor.{config.host.replace('.', '_')}.temp_{temp_name.lower()}"
 
         super().__init__(
