@@ -218,24 +218,39 @@ async def on_disconnect() -> None:
 
 
 async def on_subscribe_entities(entity_ids: list[str]):
-    """Handle entity subscriptions."""
+    """Handle entity subscriptions. Pushes current state for all subscribed entities."""
     _LOG.info(f"Entities subscription requested: {entity_ids}")
+
+    if not _device:
+        return
 
     for entity_id in entity_ids:
         if _media_player and entity_id == _media_player.id:
-            # Media player gets state from push notifications automatically
-            pass
+            if api.configured_entities.contains(_media_player.id):
+                mp_state = _device_state_to_media_player_state(_device.state)
+                api.configured_entities.update_attributes(_media_player.id, {
+                    ucapi.media_player.Attributes.STATE: mp_state,
+                    ucapi.media_player.Attributes.MEDIA_TITLE: _device.signal_info,
+                })
+
         elif _remote and entity_id == _remote.id:
-            if _device and api.configured_entities.contains(_remote.id):
-                api.configured_entities.update_attributes(
-                    _remote.id,
-                    {ucapi.remote.Attributes.STATE: _device_state_to_remote_state(_device.state)}
-                )
-        else:
-            # Check if subscribing to a temperature sensor in on_demand mode
-            if _device and _config and _config.polling_mode == "on_demand":
-                if "temp_" in entity_id:
-                    await _device.query_on_demand()
+            if api.configured_entities.contains(_remote.id):
+                api.configured_entities.update_attributes(_remote.id, {
+                    ucapi.remote.Attributes.STATE: _device_state_to_remote_state(_device.state),
+                })
+
+        elif "temp_" in entity_id:
+            if _config and _config.polling_mode == "on_demand":
+                await _device.query_on_demand()
+
+        elif entity_id.endswith(".signal"):
+            if api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                api.configured_entities.update_attributes(entity_id, {
+                    SensorAttributes.STATE: state,
+                    SensorAttributes.VALUE: _device.signal_info,
+                })
 
 
 async def main():

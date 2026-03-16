@@ -99,6 +99,18 @@ CMD_GET_MASKING_RATIO = "GetMaskingRatio"
 CMD_GET_TEMPERATURES = "GetTemperatures"
 CMD_GET_MAC_ADDRESS = "GetMacAddress"
 
+# Maps query commands to expected response prefixes. Used by the command
+# connection to distinguish the actual response from interleaved push
+# notifications that arrive on all open connections.
+RESPONSE_PREFIX = {
+    CMD_GET_SIGNAL_INFO: ("IncomingSignalInfo", "NoSignal"),
+    CMD_GET_OUTGOING_SIGNAL_INFO: ("OutgoingSignalInfo",),
+    CMD_GET_ASPECT_RATIO: ("AspectRatio",),
+    CMD_GET_MASKING_RATIO: ("MaskingRatio",),
+    CMD_GET_TEMPERATURES: ("Temperatures",),
+    CMD_GET_MAC_ADDRESS: ("MacAddress",),
+}
+
 CMD_TOGGLE = "Toggle"
 TOGGLE_TONE_MAP = "ToneMap"
 TOGGLE_HIGHLIGHT_RECOVERY = "HighlightRecovery"

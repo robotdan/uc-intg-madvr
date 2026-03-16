@@ -154,7 +154,7 @@ class MadVRDevice:
         """One-shot query for non-pushed data (temperatures). Used in on_demand polling mode."""
         if self._state == PowerState.OFF:
             return
-        result = await self._send_cmd(const.CMD_GET_TEMPERATURES, expected_prefix="Temperatures")
+        result = await self._send_cmd(const.CMD_GET_TEMPERATURES)
         if result["success"] and result.get("data"):
             notification = self._notification_processor.parse(result["data"])
             if notification and notification["type"] == "Temperatures":
@@ -362,20 +362,17 @@ class MadVRDevice:
         except asyncio.CancelledError:
             pass
 
-    async def _send_cmd(self, command: str, timeout: float | None = None,
-                       expected_prefix: str | None = None) -> dict:
+    async def _send_cmd(self, command: str, timeout: float | None = None) -> dict:
         """Send a command on the command connection, discarding interleaved notifications.
 
-        Args:
-            command: The command string to send.
-            timeout: Response timeout in seconds.
-            expected_prefix: If set, lines starting with this prefix are treated as the
-                data response rather than being discarded as interleaved notifications.
-                Required when the expected response shares a format with a push notification
-                (e.g. "Temperatures" for GetTemperatures).
+        For query commands (Get*), the expected response prefix is looked up from
+        const.RESPONSE_PREFIX so the reader can distinguish the actual response from
+        interleaved push notifications that arrive on all open connections.
         """
         if timeout is None:
             timeout = const.COMMAND_TIMEOUT
+
+        expected_prefix = const.RESPONSE_PREFIX.get(command)
 
         async with self._cmd_lock:
             try:
@@ -487,25 +484,30 @@ class MadVRDevice:
             _LOG.info("[%s] State: %s -> ON, Signal: %s", self.name, old_state, self._signal_info)
 
     def _handle_no_signal(self):
+        """Handle NoSignal notification. Does NOT change power state.
+
+        NoSignal means the device is on but has no input signal — it is not
+        entering standby. Only PowerOff/Standby notifications change power state.
+        """
         from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
 
-        old_state = self._state
-        self._state = PowerState.STANDBY
-        self._signal_info = "No Signal (Standby)"
+        old_signal = self._signal_info
+        self._signal_info = "No Signal"
 
+        # Update signal info on media player without changing power state
         self.events.emit(EVENTS.UPDATE, self.identifier, {
-            "state": self._state,
             "signal_info": self._signal_info,
         })
 
+        # Mark signal sensor as unavailable (no signal data to show)
         sensor_id = f"sensor.{self.identifier}.signal"
         self.events.emit(EVENTS.UPDATE, sensor_id, {
             SensorAttributes.STATE: SensorStates.UNAVAILABLE,
             SensorAttributes.VALUE: self._signal_info,
         })
 
-        if old_state != PowerState.STANDBY:
-            _LOG.info("[%s] State: %s -> STANDBY (no signal)", self.name, old_state)
+        if old_signal != self._signal_info:
+            _LOG.info("[%s] No signal (power state unchanged: %s)", self.name, self._state)
 
     def _handle_aspect_ratio(self, notification: dict):
         from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
@@ -662,8 +664,7 @@ class MadVRDevice:
                 if not self._listener_connected.is_set():
                     continue
 
-                result = await self._send_cmd(const.CMD_GET_TEMPERATURES,
-                                             expected_prefix="Temperatures")
+                result = await self._send_cmd(const.CMD_GET_TEMPERATURES)
                 if result["success"] and result.get("data"):
                     notification = self._notification_processor.parse(result["data"])
                     if notification and notification["type"] == "Temperatures":
@@ -711,32 +712,29 @@ class MadVRDevice:
         _LOG.info("[%s] Syncing state after reconnect", self.name)
 
         # Signal info
-        result = await self._send_cmd(const.CMD_GET_SIGNAL_INFO,
-                                      expected_prefix="IncomingSignalInfo")
+        # GetIncomingSignalInfo returns "IncomingSignalInfo ..." or "NoSignal"
+        result = await self._send_cmd(const.CMD_GET_SIGNAL_INFO)
         if result["success"] and result.get("data"):
             notification = self._notification_processor.parse(result["data"])
             if notification:
                 self._dispatch_notification(notification)
 
         # Outgoing signal info
-        result = await self._send_cmd(const.CMD_GET_OUTGOING_SIGNAL_INFO,
-                                      expected_prefix="OutgoingSignalInfo")
+        result = await self._send_cmd(const.CMD_GET_OUTGOING_SIGNAL_INFO)
         if result["success"] and result.get("data"):
             notification = self._notification_processor.parse(result["data"])
             if notification:
                 self._outgoing_signal_info = notification
 
         # Aspect ratio
-        result = await self._send_cmd(const.CMD_GET_ASPECT_RATIO,
-                                      expected_prefix="AspectRatio")
+        result = await self._send_cmd(const.CMD_GET_ASPECT_RATIO)
         if result["success"] and result.get("data"):
             notification = self._notification_processor.parse(result["data"])
             if notification:
                 self._dispatch_notification(notification)
 
         # Masking ratio
-        result = await self._send_cmd(const.CMD_GET_MASKING_RATIO,
-                                      expected_prefix="MaskingRatio")
+        result = await self._send_cmd(const.CMD_GET_MASKING_RATIO)
         if result["success"] and result.get("data"):
             notification = self._notification_processor.parse(result["data"])
             if notification:
@@ -744,17 +742,17 @@ class MadVRDevice:
 
         # Temperatures (if polling not disabled)
         if self._config.polling_mode != "disabled":
-            result = await self._send_cmd(const.CMD_GET_TEMPERATURES,
-                                          expected_prefix="Temperatures")
+            result = await self._send_cmd(const.CMD_GET_TEMPERATURES)
             if result["success"] and result.get("data"):
                 notification = self._notification_processor.parse(result["data"])
                 if notification and notification["type"] == "Temperatures":
                     self._handle_temperatures(notification)
 
-        # If no signal info came back, device is probably in standby
+        # If state is still unknown after sync, the device is on (we connected)
         if self._state == PowerState.UNKNOWN:
-            self._state = PowerState.STANDBY
-            self._signal_info = "Connected (Standby)"
+            self._state = PowerState.ON
+            if self._signal_info == "Unknown":
+                self._signal_info = "No Signal"
             self.events.emit(EVENTS.UPDATE, self.identifier, {
                 "state": self._state,
                 "signal_info": self._signal_info,
@@ -776,7 +774,7 @@ class MadVRDevice:
     async def _fetch_mac_address(self):
         _LOG.info("[%s] Fetching MAC address...", self.name)
         try:
-            result = await self._send_cmd(const.CMD_GET_MAC_ADDRESS, expected_prefix="MacAddress")
+            result = await self._send_cmd(const.CMD_GET_MAC_ADDRESS)
             if result["success"] and result.get("data"):
                 response_data = result["data"]
                 if "MacAddress" in response_data:
