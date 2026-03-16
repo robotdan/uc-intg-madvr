@@ -135,11 +135,17 @@ class MadVRDevice:
 
     async def send_command(self, command: str) -> dict:
         """Send a command via the command connection. Triggers auto-recovery."""
-        if command == const.CMD_STANDBY and self._state == PowerState.OFF:
-            _LOG.info("[%s] Device is OFF, triggering Wake-on-LAN before Standby", self.name)
-            wol_result = await self._wake_on_lan()
-            if not wol_result["success"]:
-                return wol_result
+        # Device is unreachable when in STANDBY or OFF (TCP port closed).
+        if command == const.CMD_POWER_OFF and self._state in (PowerState.OFF, PowerState.STANDBY):
+            _LOG.info("[%s] Device is already %s, power off successful", self.name, self._state.value)
+            return {"success": True}
+
+        if command == const.CMD_STANDBY and self._state in (PowerState.OFF, PowerState.STANDBY):
+            _LOG.info("[%s] Device is %s, triggering Wake-on-LAN (background)", self.name, self._state.value)
+            self._loop.create_task(self._wol_and_wait())
+            # Return immediately — background task handles WOL + recovery.
+            # Ping/listener tasks will update state when device comes online.
+            return {"success": True}
 
         # Any user command triggers auto-recovery (resets backoff)
         self._reset_backoff()
@@ -401,6 +407,10 @@ class MadVRDevice:
 
                         # Check if this is a command response (OK, ERROR, or expected data)
                         if response.startswith(const.RESPONSE_OK):
+                            if expected_prefix:
+                                # Query commands: OK is sent before the data response, keep reading
+                                _LOG.debug("[%s] OK received for query, waiting for data...", self.name)
+                                continue
                             return {"success": True}
                         elif response.startswith(const.RESPONSE_ERROR):
                             error_msg = response.replace(const.RESPONSE_ERROR, "").strip().strip('"')
@@ -420,6 +430,14 @@ class MadVRDevice:
                     return {"success": False, "error": "Timeout"}
 
                 except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError, OSError):
+                    # Power commands (Standby, PowerOff, Restart, ReloadSoftware) cause the
+                    # device to close TCP connections. The command was sent successfully but
+                    # the "OK" response may be lost. Treat as success for these commands.
+                    if command in (const.CMD_STANDBY, const.CMD_POWER_OFF,
+                                   const.CMD_RESTART, const.CMD_RELOAD_SOFTWARE):
+                        _LOG.info("[%s] Connection lost after %s (expected)", self.name, command)
+                        await self._disconnect_cmd()
+                        return {"success": True}
                     _LOG.error("[%s] Command connection lost during read", self.name)
                     await self._disconnect_cmd()
                     return {"success": False, "error": "Connection lost"}
@@ -791,6 +809,21 @@ class MadVRDevice:
             _LOG.error("[%s] Exception fetching MAC address: %s", self.name, e)
 
     # ── Wake-on-LAN ────────────────────────────────────────────────────
+
+    async def _wol_and_wait(self):
+        """Background task: send WOL, update title, wait for device to come online."""
+        self.events.emit(EVENTS.UPDATE, self.identifier, {
+            "signal_info": "Waking up...",
+        })
+
+        result = await self._wake_on_lan()
+        if not result["success"]:
+            _LOG.warning("[%s] WOL failed: %s — ping task will keep trying", self.name, result.get("error"))
+            self.events.emit(EVENTS.UPDATE, self.identifier, {
+                "signal_info": "Standby" if self._state == PowerState.STANDBY else "Powered Off",
+            })
+        # If WOL succeeded, the listener/ping tasks will detect the device
+        # and update state to ON with signal info automatically.
 
     async def _wake_on_lan(self) -> dict:
         mac_address = self._config.mac_address

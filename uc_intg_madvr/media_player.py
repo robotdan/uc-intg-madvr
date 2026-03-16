@@ -52,10 +52,15 @@ class MadVRMediaPlayer(MediaPlayer):
 
         try:
             if cmd_id == Commands.ON:
-                result = await self._device.send_command("Standby")
-                return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
-            
+                # send_command handles WOL in the background and returns immediately
+                await self._device.send_command("Standby")
+                return StatusCodes.OK
+
             elif cmd_id == Commands.OFF:
+                # Already sleeping — no need to WOL just to send Standby
+                if self._device.state.value in ("STANDBY", "OFF"):
+                    _LOG.info("Device already %s, off command successful", self._device.state.value)
+                    return StatusCodes.OK
                 result = await self._device.send_command("Standby")
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
             

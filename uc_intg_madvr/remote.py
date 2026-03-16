@@ -65,7 +65,12 @@ class MadVRRemote(Remote):
                     return StatusCodes.OK
 
             elif cmd_id == Commands.OFF:
-                result = await self._device.send_command(const.CMD_POWER_OFF)
+                # Send Standby (not PowerOff) — safe, WOL-recoverable.
+                # Full PowerOff is available via the remote's Power page.
+                if self._device.state.value in ("STANDBY", "OFF"):
+                    _LOG.info("Device already %s, off command successful", self._device.state.value)
+                    return StatusCodes.OK
+                result = await self._device.send_command(const.CMD_STANDBY)
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
 
             elif cmd_id == Commands.SEND_CMD:
@@ -82,9 +87,13 @@ class MadVRRemote(Remote):
                     _LOG.debug(f"Mapped simple command '{command}' to device command '{device_command}'")
                     command = device_command
 
-                # Check if this is a power-related command that might trigger WOL
+                # Standby via send_cmd: if already in standby, device is in desired state
+                if command == const.CMD_STANDBY and self._device.state.value == "STANDBY":
+                    _LOG.info("Device already in standby, command successful")
+                    return StatusCodes.OK
+
+                # Standby when OFF: needs WOL (may take a while)
                 if command == const.CMD_STANDBY and self._device.state.value == "OFF":
-                    # Handle like Commands.ON
                     task = asyncio.create_task(self._device.send_command(command))
                     try:
                         result = await asyncio.wait_for(task, timeout=3.0)
@@ -92,10 +101,10 @@ class MadVRRemote(Remote):
                     except asyncio.TimeoutError:
                         _LOG.info(f"Command {command} initiated (may involve WOL)")
                         return StatusCodes.OK
-                else:
-                    # Normal command
-                    result = await self._device.send_command(command)
-                    return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
+
+                # Normal command
+                result = await self._device.send_command(command)
+                return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
             else:
                 # Handle simple commands
                 device_command = self._map_simple_command_to_device(cmd_id)

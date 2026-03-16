@@ -42,13 +42,13 @@ def _device_state_to_media_player_state(dev_state: PowerState) -> ucapi.media_pl
 
     Mapping:
     - PowerState.ON → States.ON (actively processing video)
-    - PowerState.STANDBY → States.STANDBY (low power, network responsive)
-    - PowerState.OFF → States.OFF (powered off)
+    - PowerState.STANDBY → States.OFF (UI shows ON button to wake; MEDIA_TITLE distinguishes "Standby" from "Powered Off")
+    - PowerState.OFF → States.OFF (powered off, WOL-recoverable)
     - PowerState.UNKNOWN → States.UNKNOWN
     """
     state_map = {
         PowerState.ON: ucapi.media_player.States.ON,
-        PowerState.STANDBY: ucapi.media_player.States.STANDBY,
+        PowerState.STANDBY: ucapi.media_player.States.OFF,
         PowerState.OFF: ucapi.media_player.States.OFF,
         PowerState.UNKNOWN: ucapi.media_player.States.UNKNOWN,
     }
@@ -60,13 +60,13 @@ def _device_state_to_remote_state(dev_state: PowerState) -> ucapi.remote.States:
     Convert device power state to remote state.
 
     Mapping:
-    - PowerState.ON or STANDBY → States.ON (device is responsive)
-    - PowerState.OFF → States.OFF (device is not responsive)
+    - PowerState.ON → States.ON (device is responsive, TCP port open)
+    - PowerState.STANDBY or OFF → States.OFF (TCP port closed, unreachable)
     - PowerState.UNKNOWN → States.UNKNOWN
     """
-    if dev_state in (PowerState.ON, PowerState.STANDBY):
+    if dev_state == PowerState.ON:
         return ucapi.remote.States.ON
-    elif dev_state == PowerState.OFF:
+    elif dev_state in (PowerState.OFF, PowerState.STANDBY):
         return ucapi.remote.States.OFF
     else:
         return ucapi.remote.States.UNKNOWN
