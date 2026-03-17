@@ -77,6 +77,7 @@ class MadVRDevice:
         self._retry_start_time: float = 0.0
         self._power_off_time: float = 0.0  # for hysteresis
         self._fast_reconnect = False  # set by Restart/ReloadSoftware
+        self._suspended = False  # True when UC Remote is in standby
 
     @property
     def identifier(self) -> str:
@@ -131,10 +132,58 @@ class MadVRDevice:
         await self._disconnect_cmd()
         _LOG.info("[%s] Stopped", self.name)
 
+    async def suspend(self):
+        """Suspend for UC Remote standby. Cancel tasks, close connections, preserve state."""
+        if self._suspended:
+            return
+        self._suspended = True
+        _LOG.info("[%s] Suspending (UC Remote entering standby)", self.name)
+
+        # Cancel all background tasks
+        for task in [self._notification_listener_task, self._listener_heartbeat_task,
+                     self._ping_task, self._poll_task, self._cmd_idle_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        # Await disconnects (not fire-and-forget) to ensure _listener_connected is cleared
+        await self._disconnect_listener()
+        await self._disconnect_cmd()
+
+        _LOG.info("[%s] Suspended — state preserved as %s", self.name, self._state.value)
+
+    async def resume(self):
+        """Resume after UC Remote wakes from standby. Recreate tasks, reconnect, resync."""
+        if not self._suspended:
+            return
+        self._suspended = False
+        _LOG.info("[%s] Resuming (UC Remote exiting standby)", self.name)
+
+        # Reset backoff for immediate reconnection attempt
+        self._reset_backoff()
+
+        # Recreate background tasks (same as start(), but without touching _running)
+        self._listener_heartbeat_task = self._loop.create_task(self._listener_heartbeat_loop())
+        self._notification_listener_task = self._loop.create_task(self._notification_listener_loop())
+        self._ping_task = self._loop.create_task(self._ping_loop())
+
+        if self._config.polling_mode == "enabled":
+            self._poll_task = self._loop.create_task(self._poll_loop())
+
+        _LOG.info("[%s] Resumed — background tasks recreated, reconnecting", self.name)
+
     # ── Public API ──────────────────────────────────────────────────────
 
-    async def send_command(self, command: str) -> dict:
-        """Send a command via the command connection. Triggers auto-recovery."""
+    async def send_command(self, command: str, power_intent: str | None = None) -> dict:
+        """Send a command via the command connection. Triggers auto-recovery.
+
+        Args:
+            command: The madVR protocol command string.
+            power_intent: "on" or "off" for CMD_STANDBY disambiguation in reactive recovery.
+        """
         # Device is unreachable when in STANDBY or OFF (TCP port closed).
         if command == const.CMD_POWER_OFF and self._state in (PowerState.OFF, PowerState.STANDBY):
             _LOG.info("[%s] Device is already %s, power off successful", self.name, self._state.value)
@@ -150,7 +199,29 @@ class MadVRDevice:
         # Any user command triggers auto-recovery (resets backoff)
         self._reset_backoff()
 
-        return await self._send_cmd(command)
+        result = await self._send_cmd(command)
+
+        # Reactive recovery: if command failed and we thought device was ON, state is stale.
+        if not result["success"] and self._state == PowerState.ON:
+            _LOG.warning("[%s] Device unreachable but state was ON, correcting to STANDBY", self.name)
+            self._teardown_connections(PowerState.STANDBY)
+
+            # Re-evaluate based on corrected state and caller intent
+            if command == const.CMD_STANDBY:
+                if power_intent == "on":
+                    _LOG.info("[%s] Triggering WOL after state correction", self.name)
+                    self._loop.create_task(self._wol_and_wait())
+                    return {"success": True}
+                else:
+                    # power_intent="off" or None: device is already in desired state
+                    _LOG.info("[%s] Device now in STANDBY (desired state for off)", self.name)
+                    return {"success": True}
+            elif command == const.CMD_POWER_OFF:
+                _LOG.info("[%s] Device now in STANDBY (desired state for power off)", self.name)
+                return {"success": True}
+            # Any other command: device is off, can't execute — return original error
+
+        return result
 
     def set_aspect_ratio_mode(self, mode: str):
         self._aspect_ratio_mode = mode

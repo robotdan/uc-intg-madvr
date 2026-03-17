@@ -217,6 +217,20 @@ async def on_disconnect() -> None:
     _LOG.info("Remote disconnected")
 
 
+async def on_enter_standby() -> None:
+    """Handle UC Remote entering standby. Suspend device connections."""
+    _LOG.info("UC Remote entering standby")
+    if _device:
+        await _device.suspend()
+
+
+async def on_exit_standby() -> None:
+    """Handle UC Remote exiting standby. Resume device connections."""
+    _LOG.info("UC Remote exiting standby")
+    if _device:
+        await _device.resume()
+
+
 async def on_subscribe_entities(entity_ids: list[str]):
     """Handle entity subscriptions. Pushes current state for all subscribed entities."""
     _LOG.info(f"Entities subscription requested: {entity_ids}")
@@ -271,6 +285,8 @@ async def main():
         api.listens_to(Events.CONNECT)(on_connect)
         api.listens_to(Events.DISCONNECT)(on_disconnect)
         api.listens_to(Events.SUBSCRIBE_ENTITIES)(on_subscribe_entities)
+        api.listens_to(Events.ENTER_STANDBY)(on_enter_standby)
+        api.listens_to(Events.EXIT_STANDBY)(on_exit_standby)
 
         _config = MadVRConfig()
 

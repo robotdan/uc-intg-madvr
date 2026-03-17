@@ -55,7 +55,7 @@ class MadVRRemote(Remote):
 
         try:
             if cmd_id == Commands.ON:
-                task = asyncio.create_task(self._device.send_command(const.CMD_STANDBY))
+                task = asyncio.create_task(self._device.send_command(const.CMD_STANDBY, power_intent="on"))
 
                 try:
                     result = await asyncio.wait_for(task, timeout=3.0)
@@ -70,7 +70,7 @@ class MadVRRemote(Remote):
                 if self._device.state.value in ("STANDBY", "OFF"):
                     _LOG.info("Device already %s, off command successful", self._device.state.value)
                     return StatusCodes.OK
-                result = await self._device.send_command(const.CMD_STANDBY)
+                result = await self._device.send_command(const.CMD_STANDBY, power_intent="off")
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
 
             elif cmd_id == Commands.SEND_CMD:
