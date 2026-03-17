@@ -73,6 +73,7 @@ class MadVRDevice:
 
         # Reconnection state
         self._running = False
+        self._reconnect_event = asyncio.Event()
         self._backoff_index = 0
         self._retry_start_time: float = 0.0
         self._power_off_time: float = 0.0  # for hysteresis
@@ -95,6 +96,22 @@ class MadVRDevice:
     def signal_info(self) -> str:
         return self._signal_info
 
+    @property
+    def aspect_ratio(self) -> str:
+        return self._aspect_ratio
+
+    @property
+    def masking_ratio(self) -> str:
+        return self._masking_ratio
+
+    @property
+    def temperatures(self) -> list[int]:
+        return self._temperatures
+
+    @property
+    def aspect_ratio_mode(self) -> str:
+        return self._aspect_ratio_mode
+
     async def start(self):
         """Start all background tasks."""
         if self._running:
@@ -106,28 +123,14 @@ class MadVRDevice:
         else:
             _LOG.info("[%s] MAC address loaded from config: %s", self.name, self._config.mac_address)
 
-        self._listener_heartbeat_task = self._loop.create_task(self._listener_heartbeat_loop())
-        self._notification_listener_task = self._loop.create_task(self._notification_listener_loop())
-        self._ping_task = self._loop.create_task(self._ping_loop())
-
-        if self._config.polling_mode == "enabled":
-            self._poll_task = self._loop.create_task(self._poll_loop())
-
+        self._create_background_tasks()
         _LOG.info("[%s] Started push notification listener", self.name)
 
     async def stop(self):
         """Stop all background tasks and close connections."""
         self._running = False
 
-        for task in [self._notification_listener_task, self._listener_heartbeat_task,
-                     self._ping_task, self._poll_task, self._cmd_idle_task]:
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
+        await self._cancel_all_tasks()
         await self._disconnect_listener()
         await self._disconnect_cmd()
         _LOG.info("[%s] Stopped", self.name)
@@ -139,15 +142,7 @@ class MadVRDevice:
         self._suspended = True
         _LOG.info("[%s] Suspending (UC Remote entering standby)", self.name)
 
-        # Cancel all background tasks
-        for task in [self._notification_listener_task, self._listener_heartbeat_task,
-                     self._ping_task, self._poll_task, self._cmd_idle_task]:
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        await self._cancel_all_tasks()
 
         # Await disconnects (not fire-and-forget) to ensure _listener_connected is cleared
         await self._disconnect_listener()
@@ -159,21 +154,46 @@ class MadVRDevice:
         """Resume after UC Remote wakes from standby. Recreate tasks, reconnect, resync."""
         if not self._suspended:
             return
+        if not self._running:
+            _LOG.warning("[%s] Cannot resume — device is stopped", self.name)
+            return
         self._suspended = False
         _LOG.info("[%s] Resuming (UC Remote exiting standby)", self.name)
 
         # Reset backoff for immediate reconnection attempt
         self._reset_backoff()
 
-        # Recreate background tasks (same as start(), but without touching _running)
+        self._create_background_tasks()
+        _LOG.info("[%s] Resumed — background tasks recreated, reconnecting", self.name)
+
+    # ── Task Lifecycle Helpers ─────────────────────────────────────────
+
+    async def _cancel_all_tasks(self):
+        """Cancel all background tasks and await their completion."""
+        for task in [self._notification_listener_task, self._listener_heartbeat_task,
+                     self._ping_task, self._poll_task, self._cmd_idle_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    def _create_background_tasks(self):
+        """Create all background tasks."""
         self._listener_heartbeat_task = self._loop.create_task(self._listener_heartbeat_loop())
         self._notification_listener_task = self._loop.create_task(self._notification_listener_loop())
         self._ping_task = self._loop.create_task(self._ping_loop())
-
         if self._config.polling_mode == "enabled":
             self._poll_task = self._loop.create_task(self._poll_loop())
 
-        _LOG.info("[%s] Resumed — background tasks recreated, reconnecting", self.name)
+    async def _interruptible_sleep(self, seconds: float):
+        """Sleep that can be interrupted by _reconnect_event."""
+        self._reconnect_event.clear()
+        try:
+            await asyncio.wait_for(self._reconnect_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass  # Normal timeout — sleep completed
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -229,7 +249,7 @@ class MadVRDevice:
 
     async def query_on_demand(self):
         """One-shot query for non-pushed data (temperatures). Used in on_demand polling mode."""
-        if self._state == PowerState.OFF:
+        if self._state in (PowerState.OFF, PowerState.STANDBY, PowerState.UNKNOWN):
             return
         result = await self._send_cmd(const.CMD_GET_TEMPERATURES)
         if result["success"] and result.get("data"):
@@ -238,8 +258,9 @@ class MadVRDevice:
                 self._handle_temperatures(notification)
 
     async def trigger_reconnect(self):
-        """Signal auto-recovery: reset backoff and re-establish listener."""
+        """Signal auto-recovery: reset backoff and wake heartbeat loop for immediate reconnect."""
         self._reset_backoff()
+        self._reconnect_event.set()  # Wake the heartbeat loop from any sleep
         if not self._listener_connected.is_set():
             _LOG.info("[%s] Auto-recovery triggered, reconnecting", self.name)
 
@@ -309,7 +330,9 @@ class MadVRDevice:
                     await self._disconnect_listener()
                     continue
 
-                line = raw.decode().rstrip('\r\n')
+                # Use errors='replace' to handle non-UTF8 bytes from the device gracefully
+                # rather than raising UnicodeDecodeError which would trigger error recovery
+                line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
                 if not line:
                     continue
 
@@ -334,11 +357,11 @@ class MadVRDevice:
                     if delay is None:
                         # Backoff exhausted — wait for auto-recovery signal
                         _LOG.warning("[%s] Backoff exhausted, waiting for auto-recovery", self.name)
-                        await asyncio.sleep(const.BACKOFF_DELAYS[-1])
+                        await self._interruptible_sleep(const.BACKOFF_DELAYS[-1])
                         continue
 
                     if delay > 0:
-                        await asyncio.sleep(delay)
+                        await self._interruptible_sleep(delay)
 
                     if not self._running:
                         break
@@ -364,7 +387,7 @@ class MadVRDevice:
                         await self._disconnect_listener()
                         continue
 
-                await asyncio.sleep(const.HEARTBEAT_INTERVAL)
+                await self._interruptible_sleep(const.HEARTBEAT_INTERVAL)
 
             except asyncio.CancelledError:
                 break
@@ -433,7 +456,8 @@ class MadVRDevice:
                 remaining = const.COMMAND_IDLE_TIMEOUT - elapsed
                 if remaining <= 0:
                     _LOG.debug("[%s] Command connection idle, closing", self.name)
-                    await self._disconnect_cmd()
+                    async with self._cmd_lock:
+                        await self._disconnect_cmd()
                     return
                 await asyncio.sleep(remaining)
         except asyncio.CancelledError:
@@ -662,11 +686,34 @@ class MadVRDevice:
 
         old_state = self._state
         self._state = new_state
+        # Restart/ReloadSoftware also goes through this path with PowerState.OFF,
+        # but _handle_restart sets _fast_reconnect=True so the device will reconnect quickly.
         self._signal_info = "Powered Off" if new_state == PowerState.OFF else "Standby"
 
-        # Close connections (non-blocking schedule)
-        self._loop.create_task(self._disconnect_listener())
-        self._loop.create_task(self._disconnect_cmd())
+        # Synchronously close connections and clear state to prevent races.
+        # _disconnect_listener/_disconnect_cmd are async (wait_closed), but
+        # close() and clearing refs are sync and must happen NOW so the
+        # heartbeat loop doesn't try to reconnect before teardown completes.
+        self._listener_connected.clear()
+        if self._listener_writer:
+            try:
+                self._listener_writer.close()
+            except Exception:
+                pass
+            writer = self._listener_writer
+            self._listener_writer = None
+            self._listener_reader = None
+            self._loop.create_task(self._wait_writer_closed(writer))
+
+        if self._cmd_writer:
+            try:
+                self._cmd_writer.close()
+            except Exception:
+                pass
+            writer = self._cmd_writer
+            self._cmd_writer = None
+            self._cmd_reader = None
+            self._loop.create_task(self._wait_writer_closed(writer))
 
         # Emit power state change
         self.events.emit(EVENTS.UPDATE, self.identifier, {
@@ -689,6 +736,13 @@ class MadVRDevice:
             })
 
         _LOG.info("[%s] State: %s -> %s, connections torn down", self.name, old_state, new_state)
+
+    async def _wait_writer_closed(self, writer: asyncio.StreamWriter):
+        """Await writer.wait_closed() for cleanup. Fire-and-forget safe."""
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
 
     # ── Ping Task ───────────────────────────────────────────────────────
 
@@ -791,7 +845,7 @@ class MadVRDevice:
                 return None
 
         if self._backoff_index == 0:
-            return 0  # immediate first attempt
+            return 0  # Immediate first attempt before entering the 5s, 10s, 30s, 60s sequence
         return const.BACKOFF_DELAYS[min(self._backoff_index, len(const.BACKOFF_DELAYS) - 1)]
 
     # ── Post-Reconnect Sync ─────────────────────────────────────────────
@@ -888,13 +942,14 @@ class MadVRDevice:
         })
 
         result = await self._wake_on_lan()
-        if not result["success"]:
+        if result["success"]:
+            # Wake the heartbeat loop so it reconnects immediately
+            self._reconnect_event.set()
+        else:
             _LOG.warning("[%s] WOL failed: %s — ping task will keep trying", self.name, result.get("error"))
             self.events.emit(EVENTS.UPDATE, self.identifier, {
                 "signal_info": "Standby" if self._state == PowerState.STANDBY else "Powered Off",
             })
-        # If WOL succeeded, the listener/ping tasks will detect the device
-        # and update state to ON with signal info automatically.
 
     async def _wake_on_lan(self) -> dict:
         mac_address = self._config.mac_address
@@ -917,26 +972,23 @@ class MadVRDevice:
 
             _LOG.info("[%s] WOL packet sent, waiting for device...", self.name)
 
-            initial_delay = 12
-            await asyncio.sleep(initial_delay)
+            # WOL timing: 12s initial delay + 6 retries at 5s intervals = 42s max
+            await asyncio.sleep(const.WOL_INITIAL_DELAY)
 
-            max_retries = 6
-            retry_interval = 5
-            total_wait = initial_delay
-
-            for attempt in range(1, max_retries + 1):
+            for attempt in range(1, const.WOL_MAX_RETRIES + 1):
+                total_wait = const.WOL_INITIAL_DELAY + (attempt - 1) * const.WOL_RETRY_INTERVAL
                 _LOG.info("[%s] WOL connection attempt %d/%d (elapsed: %ds)",
-                          self.name, attempt, max_retries, total_wait)
+                          self.name, attempt, const.WOL_MAX_RETRIES, total_wait)
 
                 if await self._is_device_reachable():
                     _LOG.info("[%s] Wake-on-LAN successful after %ds", self.name, total_wait)
                     return {"success": True}
 
-                if attempt < max_retries:
-                    await asyncio.sleep(retry_interval)
-                    total_wait += retry_interval
-                else:
-                    return {"success": False, "error": f"Device failed to wake after {total_wait}s"}
+                if attempt < const.WOL_MAX_RETRIES:
+                    await asyncio.sleep(const.WOL_RETRY_INTERVAL)
+
+            total_wait = const.WOL_INITIAL_DELAY + (const.WOL_MAX_RETRIES - 1) * const.WOL_RETRY_INTERVAL
+            return {"success": False, "error": f"Device failed to wake after {total_wait}s"}
 
         except Exception as e:
             _LOG.error("[%s] Wake-on-LAN failed: %s", self.name, e, exc_info=True)

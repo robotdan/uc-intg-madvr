@@ -38,8 +38,10 @@ MAX_RETRY_DURATION = 1800  # 30 minutes
 # Welcome message prefix for connection validation
 WELCOME_PREFIX = "WELCOME to Envy"
 
-COMMAND_DELAY = 0.5
-POWER_COMMAND_DELAY = 2.0
+# Wake-on-LAN timing: 12s initial delay + 6 retries at 5s intervals = 42s max
+WOL_INITIAL_DELAY = 12
+WOL_MAX_RETRIES = 6
+WOL_RETRY_INTERVAL = 5
 
 CMD_POWER_OFF = "PowerOff"
 CMD_STANDBY = "Standby"

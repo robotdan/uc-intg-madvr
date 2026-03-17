@@ -78,17 +78,17 @@ async def on_device_update(identifier: str, update: dict[str, Any] | None) -> No
     if not update:
         return
 
-    _LOG.debug(f"Device update for {identifier}: {update}")
+    _LOG.debug("Device update for %s: %s", identifier, update)
 
     # Handle media player updates
-    if _media_player and identifier == _media_player.id.split('.')[1]:
+    if _media_player and _device and identifier == _device.identifier:
         if api.configured_entities.contains(_media_player.id):
             mp_attributes = {}
 
             if "state" in update:
                 mp_state = _device_state_to_media_player_state(update["state"])
                 mp_attributes[ucapi.media_player.Attributes.STATE] = mp_state
-                _LOG.info(f"Media Player state update: {update['state']} → {mp_state}")
+                _LOG.info("Media Player state update: %s → %s", update["state"], mp_state)
 
             if "signal_info" in update:
                 mp_attributes[ucapi.media_player.Attributes.MEDIA_TITLE] = update["signal_info"]
@@ -97,7 +97,7 @@ async def on_device_update(identifier: str, update: dict[str, Any] | None) -> No
                 api.configured_entities.update_attributes(_media_player.id, mp_attributes)
 
     # Handle remote updates
-    if _remote and identifier == _remote.id.split('.')[1]:
+    if _remote and _device and identifier == _device.identifier:
         if api.configured_entities.contains(_remote.id):
             if "state" in update:
                 remote_state = _device_state_to_remote_state(update["state"])
@@ -151,10 +151,10 @@ async def _initialize_entities():
         # Create select entity
         _select = MadVRAspectRatioSelect(_config, _device)
 
-        _LOG.info(f"Media Player features: {_media_player.features}")
-        _LOG.info(f"Remote features: {_remote.features}")
-        _LOG.info(f"Created {len(_sensors)} sensor entities")
-        _LOG.info(f"Created select entity for aspect ratio mode")
+        _LOG.info("Media Player features: %s", _media_player.features)
+        _LOG.info("Remote features: %s", _remote.features)
+        _LOG.info("Created %d sensor entities", len(_sensors))
+        _LOG.info("Created select entity for aspect ratio mode")
 
         api.available_entities.clear()
         api.available_entities.add(_media_player)
@@ -171,7 +171,7 @@ async def _initialize_entities():
         return True
 
     except Exception as e:
-        _LOG.error(f"Failed to initialize entities: {e}", exc_info=True)
+        _LOG.error("Failed to initialize entities: %s", e, exc_info=True)
         return False
 
 
@@ -234,7 +234,7 @@ async def on_exit_standby() -> None:
 
 async def on_subscribe_entities(entity_ids: list[str]):
     """Handle entity subscriptions. Pushes current state for all subscribed entities."""
-    _LOG.info(f"Entities subscription requested: {entity_ids}")
+    _LOG.info("Entities subscription requested: %s", entity_ids)
 
     if not _device:
         return
@@ -254,10 +254,6 @@ async def on_subscribe_entities(entity_ids: list[str]):
                     ucapi.remote.Attributes.STATE: _device_state_to_remote_state(_device.state),
                 })
 
-        elif "temp_" in entity_id:
-            if _config and _config.polling_mode == "on_demand":
-                await _device.query_on_demand()
-
         elif entity_id.endswith(".signal"):
             if api.configured_entities.contains(entity_id):
                 from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
@@ -265,6 +261,49 @@ async def on_subscribe_entities(entity_ids: list[str]):
                 api.configured_entities.update_attributes(entity_id, {
                     SensorAttributes.STATE: state,
                     SensorAttributes.VALUE: _device.signal_info,
+                })
+
+        elif entity_id.endswith(".aspect_ratio"):
+            if api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                api.configured_entities.update_attributes(entity_id, {
+                    SensorAttributes.STATE: state,
+                    SensorAttributes.VALUE: _device.aspect_ratio,
+                })
+
+        elif entity_id.endswith(".masking_ratio"):
+            if api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                api.configured_entities.update_attributes(entity_id, {
+                    SensorAttributes.STATE: state,
+                    SensorAttributes.VALUE: _device.masking_ratio,
+                })
+
+        elif "temp_" in entity_id:
+            if _config and _config.polling_mode == "on_demand":
+                await _device.query_on_demand()
+            elif api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                temp_names = ["gpu", "hdmi", "cpu", "mainboard"]
+                for idx, name in enumerate(temp_names):
+                    if entity_id.endswith(f".temp_{name}"):
+                        api.configured_entities.update_attributes(entity_id, {
+                            SensorAttributes.STATE: state,
+                            SensorAttributes.VALUE: _device.temperatures[idx],
+                            SensorAttributes.UNIT: "°C",
+                        })
+                        break
+
+        elif _select and entity_id == _select.id:
+            if api.configured_entities.contains(_select.id):
+                from ucapi.select import Attributes as SelectAttributes, States as SelectStates
+                state = SelectStates.ON if _device.state == PowerState.ON else SelectStates.UNAVAILABLE
+                api.configured_entities.update_attributes(_select.id, {
+                    SelectAttributes.STATE: state,
+                    SelectAttributes.CURRENT_OPTION: _device.aspect_ratio_mode,
                 })
 
 
@@ -314,7 +353,7 @@ async def main():
     except asyncio.CancelledError:
         _LOG.info("Driver cancelled")
     except Exception as e:
-        _LOG.error(f"Driver error: {e}", exc_info=True)
+        _LOG.error("Driver error: %s", e, exc_info=True)
     finally:
         if _device:
             await _device.stop()

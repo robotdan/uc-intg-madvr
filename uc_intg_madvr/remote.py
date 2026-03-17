@@ -65,8 +65,12 @@ class MadVRRemote(Remote):
                     return StatusCodes.OK
 
             elif cmd_id == Commands.OFF:
-                # Send Standby (not PowerOff) — safe, WOL-recoverable.
-                # Full PowerOff is available via the remote's Power page.
+                # Use Standby instead of PowerOff for faster wake-up recovery.
+                # PowerOff requires WOL + full boot; Standby wakes instantly via IR/WOL.
+                # The state guard below prevents the Standby toggle problem (sending
+                # Standby to an already-standby device would wake it). If state is
+                # stale, send_command's reactive recovery catches the mismatch.
+                # Full PowerOff is available via the remote entity's Power UI page.
                 if self._device.state.value in ("STANDBY", "OFF"):
                     _LOG.info("Device already %s, off command successful", self._device.state.value)
                     return StatusCodes.OK
@@ -114,8 +118,6 @@ class MadVRRemote(Remote):
                 else:
                     _LOG.warning(f"Unknown command: {cmd_id}")
                     return StatusCodes.NOT_IMPLEMENTED
-
-            await asyncio.sleep(const.COMMAND_DELAY)
 
         except Exception as e:
             _LOG.error(f"Command failed: {e}", exc_info=True)

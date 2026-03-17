@@ -13,6 +13,7 @@ from ucapi.media_player import Attributes, Commands, DeviceClasses, Features, Me
 
 from uc_intg_madvr.config import MadVRConfig
 from uc_intg_madvr.device import MadVRDevice
+from uc_intg_madvr import const
 
 _LOG = logging.getLogger(__name__)
 
@@ -53,15 +54,20 @@ class MadVRMediaPlayer(MediaPlayer):
         try:
             if cmd_id == Commands.ON:
                 # send_command handles WOL in the background and returns immediately
-                await self._device.send_command("Standby", power_intent="on")
+                await self._device.send_command(const.CMD_STANDBY, power_intent="on")
                 return StatusCodes.OK
 
             elif cmd_id == Commands.OFF:
-                # Already sleeping — no need to WOL just to send Standby
+                # Use Standby instead of PowerOff for faster wake-up recovery.
+                # PowerOff requires WOL + full boot; Standby wakes instantly via IR/WOL.
+                # The state guard below prevents the Standby toggle problem (sending
+                # Standby to an already-standby device would wake it). If state is
+                # stale, send_command's reactive recovery catches the mismatch.
+                # Full PowerOff is available via the remote entity's Power UI page.
                 if self._device.state.value in ("STANDBY", "OFF"):
                     _LOG.info("Device already %s, off command successful", self._device.state.value)
                     return StatusCodes.OK
-                result = await self._device.send_command("Standby", power_intent="off")
+                result = await self._device.send_command(const.CMD_STANDBY, power_intent="off")
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
             
             else:

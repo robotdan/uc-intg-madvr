@@ -10,6 +10,8 @@ structured dicts. Keeps device.py focused on connection management.
 
 import logging
 
+from uc_intg_madvr import const
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -59,8 +61,8 @@ class NotificationProcessor:
             return {"type": title}
         elif title in self.RESTART_TYPES:
             return {"type": title}
-        elif title == "NoSignal":
-            return {"type": "NoSignal"}
+        elif title == const.NO_SIGNAL:
+            return {"type": const.NO_SIGNAL}
         elif title == "Temperatures":
             return self._parse_temperatures(parts)
         elif title == "ActivateProfile":
@@ -76,25 +78,19 @@ class NotificationProcessor:
         title = line.split()[0]
         return title in self.KNOWN_NOTIFICATIONS
 
+    def _parse_signal_info(self, parts: list[str], signal_type: str) -> dict:
+        """Parse signal info fields common to IncomingSignalInfo and OutgoingSignalInfo."""
+        result = {"type": signal_type}
+        fields = ["resolution", "framerate", "3d_mode", "colorspace",
+                  "bitdepth", "hdr", "colorimetry", "blacklevels"]
+        for i, field in enumerate(fields):
+            if i + 1 < len(parts):
+                result[field] = parts[i + 1]
+        return result
+
     def _parse_incoming_signal_info(self, parts: list[str]) -> dict:
         """Parse: IncomingSignalInfo {res} {framerate} {2D/3D} {colorspace} {bitdepth} {HDR} {colorimetry} {blacklevels} {aspectratio}"""
-        result = {"type": "IncomingSignalInfo"}
-        if len(parts) >= 2:
-            result["resolution"] = parts[1]
-        if len(parts) >= 3:
-            result["framerate"] = parts[2]
-        if len(parts) >= 4:
-            result["3d_mode"] = parts[3]
-        if len(parts) >= 5:
-            result["colorspace"] = parts[4]
-        if len(parts) >= 6:
-            result["bitdepth"] = parts[5]
-        if len(parts) >= 7:
-            result["hdr"] = parts[6]
-        if len(parts) >= 8:
-            result["colorimetry"] = parts[7]
-        if len(parts) >= 9:
-            result["blacklevels"] = parts[8]
+        result = self._parse_signal_info(parts, "IncomingSignalInfo")
         if len(parts) >= 10:
             result["aspectratio"] = parts[9]
         # Build a human-readable signal description
@@ -103,24 +99,7 @@ class NotificationProcessor:
 
     def _parse_outgoing_signal_info(self, parts: list[str]) -> dict:
         """Parse: OutgoingSignalInfo {res} {framerate} {2D/3D} {colorspace} {bitdepth} {HDR} {colorimetry} {blacklevels}"""
-        result = {"type": "OutgoingSignalInfo"}
-        if len(parts) >= 2:
-            result["resolution"] = parts[1]
-        if len(parts) >= 3:
-            result["framerate"] = parts[2]
-        if len(parts) >= 4:
-            result["3d_mode"] = parts[3]
-        if len(parts) >= 5:
-            result["colorspace"] = parts[4]
-        if len(parts) >= 6:
-            result["bitdepth"] = parts[5]
-        if len(parts) >= 7:
-            result["hdr"] = parts[6]
-        if len(parts) >= 8:
-            result["colorimetry"] = parts[7]
-        if len(parts) >= 9:
-            result["blacklevels"] = parts[8]
-        return result
+        return self._parse_signal_info(parts, "OutgoingSignalInfo")
 
     def _parse_aspect_ratio(self, parts: list[str]) -> dict:
         """Parse: AspectRatio {res} {decimal} {int} {name}"""
