@@ -7,6 +7,7 @@ madVR Envy integration driver.
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 import ucapi
@@ -271,12 +272,20 @@ async def main():
     """Main entry point."""
     global api, _config
 
+    level = os.getenv("UC_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, level, logging.INFO)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     )
 
-    _LOG.info("Starting madVR Envy integration")
+    # Override ucapi library loggers (they hardcode DEBUG)
+    logging.getLogger("ucapi.api").setLevel(log_level)
+    logging.getLogger("ucapi.entities").setLevel(log_level)
+    logging.getLogger("ucapi.entity").setLevel(log_level)
+
+    _LOG.info("Starting madVR Envy integration (log level: %s)", level)
 
     try:
         loop = asyncio.get_running_loop()
