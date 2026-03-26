@@ -216,6 +216,12 @@ class MadVRDevice:
             # Ping/listener tasks will update state when device comes online.
             return {"success": True}
 
+        # Prevent Standby toggle: "Standby" is a toggle command on the madVR protocol.
+        # With power_intent="on", sending it to an already-ON device would put it to sleep.
+        if command == const.CMD_STANDBY and power_intent == "on" and self._state == PowerState.ON:
+            _LOG.info("[%s] Device already ON, power on successful", self.name)
+            return {"success": True}
+
         # Any user command triggers auto-recovery (resets backoff)
         self._reset_backoff()
 
@@ -480,9 +486,16 @@ class MadVRDevice:
                 if not await self._ensure_cmd_connected():
                     return {"success": False, "error": "Connection failed"}
 
+                # Capture local references: _teardown_connections can clear the instance
+                # attributes between await points (e.g. during drain()), which would cause
+                # NoneType errors. Local refs keep the objects alive so the underlying
+                # socket errors are raised instead, which are properly caught below.
+                writer = self._cmd_writer
+                reader = self._cmd_reader
+
                 _LOG.debug("[%s] Sending: %s", self.name, command)
-                self._cmd_writer.write(f"{command}\r\n".encode())
-                await self._cmd_writer.drain()
+                writer.write(f"{command}\r\n".encode())
+                await writer.drain()
                 self._cmd_last_used = time.monotonic()
 
                 # Read response, discarding any interleaved notifications
@@ -494,7 +507,7 @@ class MadVRDevice:
                             raise asyncio.TimeoutError()
 
                         raw = await asyncio.wait_for(
-                            self._cmd_reader.readuntil(b'\n'),
+                            reader.readuntil(b'\n'),
                             timeout=remaining,
                         )
                         response = raw.decode().rstrip('\r\n')
