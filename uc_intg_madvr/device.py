@@ -891,15 +891,18 @@ class MadVRDevice:
                 if notification and notification["type"] == "Temperatures":
                     self._handle_temperatures(notification)
 
-        # If state is still unknown after sync, the device is on (we connected)
-        if self._state == PowerState.UNKNOWN:
+        # We successfully connected and queried the device — it's on.
+        # This corrects stale state from STANDBY/OFF/UNKNOWN after a wake.
+        if self._state != PowerState.ON:
+            old_state = self._state
             self._state = PowerState.ON
-            if self._signal_info == "Unknown":
+            if self._signal_info in ("Unknown", "Standby", "Powered Off"):
                 self._signal_info = "No Signal"
             self.events.emit(EVENTS.UPDATE, self.identifier, {
                 "state": self._state,
                 "signal_info": self._signal_info,
             })
+            _LOG.info("[%s] State: %s -> ON (connected after sync)", self.name, old_state)
 
     # ── Select Entity Helper ────────────────────────────────────────────
 
@@ -951,6 +954,12 @@ class MadVRDevice:
                 "signal_info": "Standby" if self._state == PowerState.STANDBY else "Powered Off",
             })
 
+    def _send_wol_packet(self, magic_packet: bytes):
+        """Send a single WOL magic packet via UDP broadcast."""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(magic_packet, ('<broadcast>', 9))
+
     async def _wake_on_lan(self) -> dict:
         mac_address = self._config.mac_address
 
@@ -960,29 +969,32 @@ class MadVRDevice:
 
         try:
             mac_with_colons = mac_address.replace("-", ":")
-            _LOG.info("[%s] Sending WOL packet to MAC: %s", self.name, mac_with_colons)
-
             mac_bytes = bytes.fromhex(mac_with_colons.replace(":", ""))
             magic_packet = b'\xff' * 6 + mac_bytes * 16
 
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                sock.sendto(magic_packet, ('<broadcast>', 9))
+            # Send initial burst of WOL packets — UDP is unreliable and the
+            # NIC may miss a single packet, especially during power transitions.
+            _LOG.info("[%s] Sending WOL packets to MAC: %s", self.name, mac_with_colons)
+            for _ in range(3):
+                self._send_wol_packet(magic_packet)
 
-            _LOG.info("[%s] WOL packet sent, waiting for device...", self.name)
+            _LOG.info("[%s] WOL packets sent, waiting for device...", self.name)
 
             # WOL timing: 12s initial delay + 6 retries at 5s intervals = 42s max
             await asyncio.sleep(const.WOL_INITIAL_DELAY)
 
             for attempt in range(1, const.WOL_MAX_RETRIES + 1):
                 total_wait = const.WOL_INITIAL_DELAY + (attempt - 1) * const.WOL_RETRY_INTERVAL
-                _LOG.info("[%s] WOL connection attempt %d/%d (elapsed: %ds)",
+                _LOG.info("[%s] WOL attempt %d/%d (elapsed: %ds)",
                           self.name, attempt, const.WOL_MAX_RETRIES, total_wait)
 
                 if await self._is_device_reachable():
                     _LOG.info("[%s] Wake-on-LAN successful after %ds", self.name, total_wait)
                     return {"success": True}
 
+                # Re-send WOL packet on each retry — the NIC may need
+                # repeated nudges to wake from deep standby.
+                self._send_wol_packet(magic_packet)
                 await asyncio.sleep(const.WOL_RETRY_INTERVAL)
 
             total_wait = const.WOL_INITIAL_DELAY + const.WOL_MAX_RETRIES * const.WOL_RETRY_INTERVAL
