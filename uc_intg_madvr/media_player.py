@@ -63,7 +63,7 @@ class MadVRMediaPlayer(MediaPlayer):
                 # The state guard below prevents the Standby toggle problem (sending
                 # Standby to an already-standby device would wake it). If state is
                 # stale, send_command's reactive recovery catches the mismatch.
-                # Full PowerOff is available via the remote entity's Power UI page.
+                # Full PowerOff is available via the Power UI page or 'Power Off' simple command.
                 if self._device.state.value in ("STANDBY", "OFF"):
                     _LOG.info("Device already %s, off command successful", self._device.state.value)
                     return StatusCodes.OK

@@ -210,6 +210,9 @@ class MadVRDevice:
             return {"success": True}
 
         if command == const.CMD_STANDBY and self._state in (PowerState.OFF, PowerState.STANDBY):
+            if power_intent == "off":
+                _LOG.info("[%s] Device already %s, off command successful", self.name, self._state.value)
+                return {"success": True}
             _LOG.info("[%s] Device is %s, triggering Wake-on-LAN (background)", self.name, self._state.value)
             self._loop.create_task(self._wol_and_wait())
             # Return immediately — background task handles WOL + recovery.
@@ -288,7 +291,6 @@ class MadVRDevice:
             if not welcome.startswith(const.WELCOME_PREFIX):
                 _LOG.error("[%s] Invalid welcome message: %s", self.name, welcome)
                 writer.close()
-                await writer.wait_closed()
                 return False
 
             _LOG.info("[%s] Listener connected: %s", self.name, welcome)
@@ -308,7 +310,6 @@ class MadVRDevice:
         if self._listener_writer:
             try:
                 self._listener_writer.close()
-                await self._listener_writer.wait_closed()
             except Exception:
                 pass
             finally:
@@ -422,7 +423,6 @@ class MadVRDevice:
             if not welcome.startswith(const.WELCOME_PREFIX):
                 _LOG.error("[%s] Command connection: invalid welcome: %s", self.name, welcome)
                 writer.close()
-                await writer.wait_closed()
                 return False
 
             self._cmd_reader = reader
@@ -447,7 +447,6 @@ class MadVRDevice:
         if self._cmd_writer:
             try:
                 self._cmd_writer.close()
-                await self._cmd_writer.wait_closed()
             except Exception:
                 pass
             finally:
@@ -703,30 +702,25 @@ class MadVRDevice:
         # but _handle_restart sets _fast_reconnect=True so the device will reconnect quickly.
         self._signal_info = "Powered Off" if new_state == PowerState.OFF else "Standby"
 
-        # Synchronously close connections and clear state to prevent races.
-        # _disconnect_listener/_disconnect_cmd are async (wait_closed), but
-        # close() and clearing refs are sync and must happen NOW so the
-        # heartbeat loop doesn't try to reconnect before teardown completes.
+        # Synchronously close connections and clear refs to prevent races.
+        # close() is sync and must happen NOW so the heartbeat loop doesn't
+        # try to reconnect before teardown completes.
         self._listener_connected.clear()
         if self._listener_writer:
             try:
                 self._listener_writer.close()
             except Exception:
                 pass
-            writer = self._listener_writer
             self._listener_writer = None
             self._listener_reader = None
-            self._loop.create_task(self._wait_writer_closed(writer))
 
         if self._cmd_writer:
             try:
                 self._cmd_writer.close()
             except Exception:
                 pass
-            writer = self._cmd_writer
             self._cmd_writer = None
             self._cmd_reader = None
-            self._loop.create_task(self._wait_writer_closed(writer))
 
         # Emit power state change
         self.events.emit(EVENTS.UPDATE, self.identifier, {
@@ -749,13 +743,6 @@ class MadVRDevice:
             })
 
         _LOG.info("[%s] State: %s -> %s, connections torn down", self.name, old_state, new_state)
-
-    async def _wait_writer_closed(self, writer: asyncio.StreamWriter):
-        """Await writer.wait_closed() for cleanup. Fire-and-forget safe."""
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
 
     # ── Ping Task ───────────────────────────────────────────────────────
 
@@ -783,6 +770,7 @@ class MadVRDevice:
                 if reachable and not self._listener_connected.is_set():
                     _LOG.info("[%s] Ping: device is reachable, triggering reconnect", self.name)
                     self._reset_backoff()
+                    self._reconnect_event.set()
                     self._power_off_time = 0.0
 
             except asyncio.CancelledError:
@@ -798,7 +786,6 @@ class MadVRDevice:
                 timeout=3.0,
             )
             writer.close()
-            await writer.wait_closed()
             return True
         except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
             return False
@@ -842,7 +829,7 @@ class MadVRDevice:
         """Move to the next backoff delay."""
         if self._retry_start_time == 0.0:
             self._retry_start_time = time.monotonic()
-        if self._backoff_index < len(const.BACKOFF_DELAYS) - 1:
+        if self._backoff_index < len(const.BACKOFF_DELAYS):
             self._backoff_index += 1
 
     def _get_reconnect_delay(self) -> float | None:
@@ -858,8 +845,8 @@ class MadVRDevice:
                 return None
 
         if self._backoff_index == 0:
-            return 0  # Immediate first attempt before entering the 5s, 10s, 30s, 60s sequence
-        return const.BACKOFF_DELAYS[min(self._backoff_index, len(const.BACKOFF_DELAYS) - 1)]
+            return 0  # Immediate first attempt before entering backoff sequence
+        return const.BACKOFF_DELAYS[min(self._backoff_index - 1, len(const.BACKOFF_DELAYS) - 1)]
 
     # ── Post-Reconnect Sync ─────────────────────────────────────────────
 
@@ -978,10 +965,9 @@ class MadVRDevice:
             mac_bytes = bytes.fromhex(mac_with_colons.replace(":", ""))
             magic_packet = b'\xff' * 6 + mac_bytes * 16
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.sendto(magic_packet, ('<broadcast>', 9))
-            sock.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.sendto(magic_packet, ('<broadcast>', 9))
 
             _LOG.info("[%s] WOL packet sent, waiting for device...", self.name)
 
@@ -997,10 +983,9 @@ class MadVRDevice:
                     _LOG.info("[%s] Wake-on-LAN successful after %ds", self.name, total_wait)
                     return {"success": True}
 
-                if attempt < const.WOL_MAX_RETRIES:
-                    await asyncio.sleep(const.WOL_RETRY_INTERVAL)
+                await asyncio.sleep(const.WOL_RETRY_INTERVAL)
 
-            total_wait = const.WOL_INITIAL_DELAY + (const.WOL_MAX_RETRIES - 1) * const.WOL_RETRY_INTERVAL
+            total_wait = const.WOL_INITIAL_DELAY + const.WOL_MAX_RETRIES * const.WOL_RETRY_INTERVAL
             return {"success": False, "error": f"Device failed to wake after {total_wait}s"}
 
         except Exception as e:
