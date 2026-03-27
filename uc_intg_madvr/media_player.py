@@ -60,13 +60,9 @@ class MadVRMediaPlayer(MediaPlayer):
             elif cmd_id == Commands.OFF:
                 # Use Standby instead of PowerOff for faster wake-up recovery.
                 # PowerOff requires WOL + full boot; Standby wakes instantly via IR/WOL.
-                # The state guard below prevents the Standby toggle problem (sending
-                # Standby to an already-standby device would wake it). If state is
-                # stale, send_command's reactive recovery catches the mismatch.
+                # send_command handles all state guards (already-off short-circuit, Standby
+                # toggle prevention, reactive recovery for stale state).
                 # Full PowerOff is available via the Power UI page or 'Power Off' simple command.
-                if self._device.state.value in ("STANDBY", "OFF"):
-                    _LOG.info("Device already %s, off command successful", self._device.state.value)
-                    return StatusCodes.OK
                 result = await self._device.send_command(const.CMD_STANDBY, power_intent="off")
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
             

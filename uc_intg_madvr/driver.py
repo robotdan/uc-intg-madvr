@@ -47,6 +47,9 @@ def _device_state_to_media_player_state(dev_state: PowerState) -> ucapi.media_pl
     - PowerState.OFF → States.OFF (powered off, WOL-recoverable)
     - PowerState.UNKNOWN → States.UNKNOWN
     """
+    # STANDBY → OFF is intentional: the madVR Envy closes its TCP port during
+    # standby, making the device unreachable. This differs from some integrations
+    # where standby means "low-power but responsive."
     state_map = {
         PowerState.ON: ucapi.media_player.States.ON,
         PowerState.STANDBY: ucapi.media_player.States.OFF,
@@ -67,6 +70,9 @@ def _device_state_to_remote_state(dev_state: PowerState) -> ucapi.remote.States:
     """
     if dev_state == PowerState.ON:
         return ucapi.remote.States.ON
+    # STANDBY → OFF is intentional: the madVR Envy closes its TCP port during
+    # standby, making the device unreachable. This differs from some integrations
+    # where standby means "low-power but responsive."
     elif dev_state in (PowerState.OFF, PowerState.STANDBY):
         return ucapi.remote.States.OFF
     else:
