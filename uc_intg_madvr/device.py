@@ -826,11 +826,17 @@ class MadVRDevice:
         self._retry_start_time = 0.0
 
     def _advance_backoff(self):
-        """Move to the next backoff delay."""
+        """Move to the next backoff delay. Corrects stale ON state after repeated failures."""
         if self._retry_start_time == 0.0:
             self._retry_start_time = time.monotonic()
         if self._backoff_index < len(const.BACKOFF_DELAYS):
             self._backoff_index += 1
+
+        # If we've exhausted the initial backoff sequence and state is still ON,
+        # the device is unreachable — correct to STANDBY so the UI shows OFF.
+        if self._backoff_index >= len(const.BACKOFF_DELAYS) and self._state == PowerState.ON:
+            _LOG.warning("[%s] Device unreachable after backoff sequence, correcting ON -> STANDBY", self.name)
+            self._teardown_connections(PowerState.STANDBY)
 
     def _get_reconnect_delay(self) -> float | None:
         """Get the next reconnect delay, or None if backoff is exhausted."""
@@ -853,47 +859,59 @@ class MadVRDevice:
     async def _sync_state_after_reconnect(self):
         """Query full device state via command connection after listener reconnects."""
         _LOG.info("[%s] Syncing state after reconnect", self.name)
+        any_query_succeeded = False
 
         # Signal info
         # GetIncomingSignalInfo returns "IncomingSignalInfo ..." or "NoSignal"
         result = await self._send_cmd(const.CMD_GET_SIGNAL_INFO)
-        if result["success"] and result.get("data"):
-            notification = self._notification_processor.parse(result["data"])
-            if notification:
-                self._dispatch_notification(notification)
+        if result["success"]:
+            any_query_succeeded = True
+            if result.get("data"):
+                notification = self._notification_processor.parse(result["data"])
+                if notification:
+                    self._dispatch_notification(notification)
 
         # Outgoing signal info
         result = await self._send_cmd(const.CMD_GET_OUTGOING_SIGNAL_INFO)
-        if result["success"] and result.get("data"):
-            notification = self._notification_processor.parse(result["data"])
-            if notification:
-                self._outgoing_signal_info = notification
+        if result["success"]:
+            any_query_succeeded = True
+            if result.get("data"):
+                notification = self._notification_processor.parse(result["data"])
+                if notification:
+                    self._outgoing_signal_info = notification
 
         # Aspect ratio
         result = await self._send_cmd(const.CMD_GET_ASPECT_RATIO)
-        if result["success"] and result.get("data"):
-            notification = self._notification_processor.parse(result["data"])
-            if notification:
-                self._dispatch_notification(notification)
+        if result["success"]:
+            any_query_succeeded = True
+            if result.get("data"):
+                notification = self._notification_processor.parse(result["data"])
+                if notification:
+                    self._dispatch_notification(notification)
 
         # Masking ratio
         result = await self._send_cmd(const.CMD_GET_MASKING_RATIO)
-        if result["success"] and result.get("data"):
-            notification = self._notification_processor.parse(result["data"])
-            if notification:
-                self._dispatch_notification(notification)
+        if result["success"]:
+            any_query_succeeded = True
+            if result.get("data"):
+                notification = self._notification_processor.parse(result["data"])
+                if notification:
+                    self._dispatch_notification(notification)
 
         # Temperatures (if polling not disabled)
         if self._config.polling_mode != "disabled":
             result = await self._send_cmd(const.CMD_GET_TEMPERATURES)
-            if result["success"] and result.get("data"):
-                notification = self._notification_processor.parse(result["data"])
-                if notification and notification["type"] == "Temperatures":
-                    self._handle_temperatures(notification)
+            if result["success"]:
+                any_query_succeeded = True
+                if result.get("data"):
+                    notification = self._notification_processor.parse(result["data"])
+                    if notification and notification["type"] == "Temperatures":
+                        self._handle_temperatures(notification)
 
-        # We successfully connected and queried the device — it's on.
-        # This corrects stale state from STANDBY/OFF/UNKNOWN after a wake.
-        if self._state != PowerState.ON:
+        # Only correct state to ON if we actually communicated with the device.
+        # The listener connection alone isn't proof — the Envy's TCP port can
+        # briefly accept connections during its shutdown transition.
+        if any_query_succeeded and self._state != PowerState.ON:
             old_state = self._state
             self._state = PowerState.ON
             if self._signal_info in ("Unknown", "Standby", "Powered Off"):
@@ -903,6 +921,8 @@ class MadVRDevice:
                 "signal_info": self._signal_info,
             })
             _LOG.info("[%s] State: %s -> ON (connected after sync)", self.name, old_state)
+        elif not any_query_succeeded:
+            _LOG.warning("[%s] Sync queries all failed — device may be shutting down", self.name)
 
     # ── Select Entity Helper ────────────────────────────────────────────
 
