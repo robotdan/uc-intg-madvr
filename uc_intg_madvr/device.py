@@ -189,11 +189,15 @@ class MadVRDevice:
 
     async def _interruptible_sleep(self, seconds: float):
         """Sleep that can be interrupted by _reconnect_event."""
-        self._reconnect_event.clear()
+        if self._reconnect_event.is_set():
+            self._reconnect_event.clear()
+            return  # Signal already pending — wake immediately
         try:
             await asyncio.wait_for(self._reconnect_event.wait(), timeout=seconds)
         except asyncio.TimeoutError:
             pass  # Normal timeout — sleep completed
+        finally:
+            self._reconnect_event.clear()
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -460,10 +464,15 @@ class MadVRDevice:
                 elapsed = time.monotonic() - self._cmd_last_used
                 remaining = const.COMMAND_IDLE_TIMEOUT - elapsed
                 if remaining <= 0:
-                    _LOG.debug("[%s] Command connection idle, closing", self.name)
                     async with self._cmd_lock:
-                        await self._disconnect_cmd()
-                    return
+                        # Re-check — a command may have refreshed the timestamp
+                        elapsed = time.monotonic() - self._cmd_last_used
+                        if elapsed >= const.COMMAND_IDLE_TIMEOUT:
+                            _LOG.debug("[%s] Command connection idle, closing", self.name)
+                            await self._disconnect_cmd()
+                            return
+                    # Not idle anymore, recalculate
+                    continue
                 await asyncio.sleep(remaining)
         except asyncio.CancelledError:
             pass
@@ -624,10 +633,10 @@ class MadVRDevice:
             "signal_info": self._signal_info,
         })
 
-        # Mark signal sensor as unavailable (no signal data to show)
+        # Signal sensor is ON with "No Signal" value — device is reachable, just no input
         sensor_id = f"sensor.{self.identifier}.signal"
         self.events.emit(EVENTS.UPDATE, sensor_id, {
-            SensorAttributes.STATE: SensorStates.UNAVAILABLE,
+            SensorAttributes.STATE: SensorStates.ON,
             SensorAttributes.VALUE: self._signal_info,
         })
 
@@ -690,17 +699,18 @@ class MadVRDevice:
         self._fast_reconnect = True
         self._power_off_time = 0.0  # no hysteresis for restart
 
-        self._teardown_connections(PowerState.OFF)
+        self._teardown_connections(PowerState.OFF, signal_info="Restarting")
 
-    def _teardown_connections(self, new_state: PowerState):
+    def _teardown_connections(self, new_state: PowerState, signal_info: str | None = None):
         """Close all connections, clear state, mark entities unavailable."""
         from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
 
         old_state = self._state
         self._state = new_state
-        # Restart/ReloadSoftware also goes through this path with PowerState.OFF,
-        # but _handle_restart sets _fast_reconnect=True so the device will reconnect quickly.
-        self._signal_info = "Powered Off" if new_state == PowerState.OFF else "Standby"
+        if signal_info is not None:
+            self._signal_info = signal_info
+        else:
+            self._signal_info = "Powered Off" if new_state == PowerState.OFF else "Standby"
 
         # Synchronously close connections and clear refs to prevent races.
         # close() is sync and must happen NOW so the heartbeat loop doesn't
@@ -839,7 +849,7 @@ class MadVRDevice:
             self._teardown_connections(PowerState.STANDBY)
 
     def _get_reconnect_delay(self) -> float | None:
-        """Get the next reconnect delay, or None if backoff is exhausted."""
+        """Get the next reconnect delay, or None if max retry duration exceeded."""
         if self._fast_reconnect:
             self._fast_reconnect = False
             return const.FAST_RECONNECT_DELAY

@@ -239,6 +239,7 @@ async def on_subscribe_entities(entity_ids: list[str]):
     if not _device:
         return
 
+    temp_on_demand_queried = False
     for entity_id in entity_ids:
         if _media_player and entity_id == _media_player.id:
             if api.configured_entities.contains(_media_player.id):
@@ -283,7 +284,9 @@ async def on_subscribe_entities(entity_ids: list[str]):
 
         elif "temp_" in entity_id:
             if _config and _config.polling_mode == "on_demand":
-                await _device.query_on_demand()
+                if not temp_on_demand_queried:
+                    temp_on_demand_queried = True
+                    await _device.query_on_demand()
             elif api.configured_entities.contains(entity_id):
                 from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
                 state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE

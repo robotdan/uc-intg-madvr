@@ -61,7 +61,7 @@ class MadVRRemote(Remote):
                     result = await asyncio.wait_for(task, timeout=3.0)
                     return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
                 except asyncio.TimeoutError:
-                    _LOG.info("Power ON command initiated (may take up to 40s for WOL)")
+                    _LOG.info("Power ON command initiated (may take up to 42s for WOL)")
                     return StatusCodes.OK
 
             elif cmd_id == Commands.OFF:
