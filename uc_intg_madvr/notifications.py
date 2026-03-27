@@ -38,7 +38,8 @@ class NotificationProcessor:
         """Parse a notification line and return a structured dict, or None if ignored.
 
         Returns dict with at least a "type" key. Additional keys depend on type.
-        Returns None for OK acknowledgments and unknown notifications.
+        Returns None for OK acknowledgments, known-but-unhandled notifications
+        (e.g. OpenMenu, KeyPress), and truly unknown notifications.
         """
         if not line:
             return None
@@ -68,7 +69,7 @@ class NotificationProcessor:
         elif title == "ActivateProfile":
             return self._parse_activate_profile(parts)
         else:
-            _LOG.debug("Unknown notification: %s", line)
+            _LOG.debug("Unhandled notification: %s", line)
             return None
 
     def is_notification(self, line: str) -> bool:

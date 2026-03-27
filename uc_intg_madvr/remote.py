@@ -67,13 +67,9 @@ class MadVRRemote(Remote):
             elif cmd_id == Commands.OFF:
                 # Use Standby instead of PowerOff for faster wake-up recovery.
                 # PowerOff requires WOL + full boot; Standby wakes instantly via IR/WOL.
-                # The state guard below prevents the Standby toggle problem (sending
-                # Standby to an already-standby device would wake it). If state is
-                # stale, send_command's reactive recovery catches the mismatch.
+                # send_command handles all state guards (already-off short-circuit, Standby
+                # toggle prevention, reactive recovery for stale state).
                 # Full PowerOff is available via the Power UI page or 'Power Off' simple command.
-                if self._device.state.value in ("STANDBY", "OFF"):
-                    _LOG.info("Device already %s, off command successful", self._device.state.value)
-                    return StatusCodes.OK
                 result = await self._device.send_command(const.CMD_STANDBY, power_intent="off")
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
 
@@ -96,8 +92,10 @@ class MadVRRemote(Remote):
                     _LOG.info("Device already in standby, command successful")
                     return StatusCodes.OK
 
-                # Standby when OFF: needs WOL (may take a while)
-                if command == const.CMD_STANDBY and self._device.state.value == "OFF":
+                # Standby when OFF or UNKNOWN: needs WOL (may take a while).
+                # UNKNOWN is treated as OFF because the TCP port is likely closed and
+                # the command would fail anyway. WOL is safe if already on (NIC ignores it).
+                if command == const.CMD_STANDBY and self._device.state.value in ("OFF", "UNKNOWN"):
                     task = asyncio.create_task(self._device.send_command(command, power_intent="on"))
                     try:
                         result = await asyncio.wait_for(task, timeout=3.0)

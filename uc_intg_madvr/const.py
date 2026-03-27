@@ -43,6 +43,15 @@ WOL_INITIAL_DELAY = 12
 WOL_MAX_RETRIES = 6
 WOL_RETRY_INTERVAL = 5
 
+# Signal info display strings — used by _teardown_connections, _handle_no_signal,
+# and _sync_state_after_reconnect to set and detect stale signal state.
+SIGNAL_NO_SIGNAL = "No Signal"
+SIGNAL_UNKNOWN = "Unknown"
+SIGNAL_STANDBY = "Standby"
+SIGNAL_POWERED_OFF = "Powered Off"
+SIGNAL_RESTARTING = "Restarting"
+STALE_SIGNALS = frozenset({SIGNAL_UNKNOWN, SIGNAL_STANDBY, SIGNAL_POWERED_OFF, SIGNAL_RESTARTING})
+
 CMD_POWER_OFF = "PowerOff"
 CMD_STANDBY = "Standby"
 CMD_RESTART = "Restart"

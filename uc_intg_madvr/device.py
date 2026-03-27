@@ -42,7 +42,7 @@ class MadVRDevice:
         self.events = AsyncIOEventEmitter(self._loop)
         self._config = config
         self._state: PowerState = PowerState.UNKNOWN
-        self._signal_info: str = "Unknown"
+        self._signal_info: str = const.SIGNAL_UNKNOWN
         self._notification_processor = NotificationProcessor()
 
         # Listener connection (persistent, for push notifications)
@@ -70,6 +70,7 @@ class MadVRDevice:
         self._listener_heartbeat_task: asyncio.Task | None = None
         self._ping_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
+        self._wol_task: asyncio.Task | None = None
 
         # Reconnection state
         self._running = False
@@ -171,7 +172,8 @@ class MadVRDevice:
     async def _cancel_all_tasks(self):
         """Cancel all background tasks and await their completion."""
         for task in [self._notification_listener_task, self._listener_heartbeat_task,
-                     self._ping_task, self._poll_task, self._cmd_idle_task]:
+                     self._ping_task, self._poll_task, self._cmd_idle_task,
+                     self._wol_task]:
             if task and not task.done():
                 task.cancel()
                 try:
@@ -186,6 +188,12 @@ class MadVRDevice:
         self._ping_task = self._loop.create_task(self._ping_loop())
         if self._config.polling_mode == "enabled":
             self._poll_task = self._loop.create_task(self._poll_loop())
+
+    def _cancel_wol_task(self):
+        """Cancel any running WOL task."""
+        if self._wol_task and not self._wol_task.done():
+            self._wol_task.cancel()
+        self._wol_task = None
 
     async def _interruptible_sleep(self, seconds: float):
         """Sleep that can be interrupted by _reconnect_event."""
@@ -210,15 +218,20 @@ class MadVRDevice:
         """
         # Device is unreachable when in STANDBY or OFF (TCP port closed).
         if command == const.CMD_POWER_OFF and self._state in (PowerState.OFF, PowerState.STANDBY):
+            self._cancel_wol_task()
             _LOG.info("[%s] Device is already %s, power off successful", self.name, self._state.value)
             return {"success": True}
 
-        if command == const.CMD_STANDBY and self._state in (PowerState.OFF, PowerState.STANDBY):
+        # UNKNOWN is treated as OFF for Standby: TCP port is likely closed and the
+        # command would fail. WOL is safe if already on (NIC ignores the magic packet).
+        if command == const.CMD_STANDBY and self._state in (PowerState.OFF, PowerState.STANDBY, PowerState.UNKNOWN):
             if power_intent == "off":
+                self._cancel_wol_task()
                 _LOG.info("[%s] Device already %s, off command successful", self.name, self._state.value)
                 return {"success": True}
             _LOG.info("[%s] Device is %s, triggering Wake-on-LAN (background)", self.name, self._state.value)
-            self._loop.create_task(self._wol_and_wait())
+            self._cancel_wol_task()
+            self._wol_task = self._loop.create_task(self._wol_and_wait())
             # Return immediately — background task handles WOL + recovery.
             # Ping/listener tasks will update state when device comes online.
             return {"success": True}
@@ -228,6 +241,10 @@ class MadVRDevice:
         if command == const.CMD_STANDBY and power_intent == "on" and self._state == PowerState.ON:
             _LOG.info("[%s] Device already ON, power on successful", self.name)
             return {"success": True}
+
+        # Cancel any running WOL if this is an off/power-off command
+        if power_intent == "off" or command == const.CMD_POWER_OFF:
+            self._cancel_wol_task()
 
         # Any user command triggers auto-recovery (resets backoff)
         self._reset_backoff()
@@ -243,7 +260,8 @@ class MadVRDevice:
             if command == const.CMD_STANDBY:
                 if power_intent == "on":
                     _LOG.info("[%s] Triggering WOL after state correction", self.name)
-                    self._loop.create_task(self._wol_and_wait())
+                    self._cancel_wol_task()
+                    self._wol_task = self._loop.create_task(self._wol_and_wait())
                     return {"success": True}
                 else:
                     # power_intent="off" or None: device is already in desired state
@@ -480,9 +498,10 @@ class MadVRDevice:
     async def _send_cmd(self, command: str, timeout: float | None = None) -> dict:
         """Send a command on the command connection, discarding interleaved notifications.
 
-        For query commands (Get*), the expected response prefix is looked up from
-        const.RESPONSE_PREFIX so the reader can distinguish the actual response from
-        interleaved push notifications that arrive on all open connections.
+        For query commands (Get*), the expected response prefix(es) are looked up from
+        const.RESPONSE_PREFIX (values are tuples of prefix strings) so the reader can
+        distinguish the actual response from interleaved push notifications that arrive
+        on all open connections.
         """
         if timeout is None:
             timeout = const.COMMAND_TIMEOUT
@@ -626,7 +645,7 @@ class MadVRDevice:
         from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
 
         old_signal = self._signal_info
-        self._signal_info = "No Signal"
+        self._signal_info = const.SIGNAL_NO_SIGNAL
 
         # Update signal info on media player without changing power state
         self.events.emit(EVENTS.UPDATE, self.identifier, {
@@ -699,7 +718,7 @@ class MadVRDevice:
         self._fast_reconnect = True
         self._power_off_time = 0.0  # no hysteresis for restart
 
-        self._teardown_connections(PowerState.OFF, signal_info="Restarting")
+        self._teardown_connections(PowerState.OFF, signal_info=const.SIGNAL_RESTARTING)
 
     def _teardown_connections(self, new_state: PowerState, signal_info: str | None = None):
         """Close all connections, clear state, mark entities unavailable."""
@@ -710,7 +729,7 @@ class MadVRDevice:
         if signal_info is not None:
             self._signal_info = signal_info
         else:
-            self._signal_info = "Powered Off" if new_state == PowerState.OFF else "Standby"
+            self._signal_info = const.SIGNAL_POWERED_OFF if new_state == PowerState.OFF else const.SIGNAL_STANDBY
 
         # Synchronously close connections and clear refs to prevent races.
         # close() is sync and must happen NOW so the heartbeat loop doesn't
@@ -812,7 +831,7 @@ class MadVRDevice:
                     break
 
                 # Only poll when device is known-on and listener is connected
-                if self._state in (PowerState.OFF, PowerState.UNKNOWN):
+                if self._state in (PowerState.OFF, PowerState.STANDBY, PowerState.UNKNOWN):
                     continue
                 if not self._listener_connected.is_set():
                     continue
@@ -924,8 +943,8 @@ class MadVRDevice:
         if any_query_succeeded and self._state != PowerState.ON:
             old_state = self._state
             self._state = PowerState.ON
-            if self._signal_info in ("Unknown", "Standby", "Powered Off"):
-                self._signal_info = "No Signal"
+            if self._signal_info in const.STALE_SIGNALS:
+                self._signal_info = const.SIGNAL_NO_SIGNAL
             self.events.emit(EVENTS.UPDATE, self.identifier, {
                 "state": self._state,
                 "signal_info": self._signal_info,
@@ -981,7 +1000,7 @@ class MadVRDevice:
         else:
             _LOG.warning("[%s] WOL failed: %s — ping task will keep trying", self.name, result.get("error"))
             self.events.emit(EVENTS.UPDATE, self.identifier, {
-                "signal_info": "Standby" if self._state == PowerState.STANDBY else "Powered Off",
+                "signal_info": const.SIGNAL_STANDBY if self._state == PowerState.STANDBY else const.SIGNAL_POWERED_OFF,
             })
 
     def _send_wol_packet(self, magic_packet: bytes):
@@ -1014,6 +1033,15 @@ class MadVRDevice:
             await asyncio.sleep(const.WOL_INITIAL_DELAY)
 
             for attempt in range(1, const.WOL_MAX_RETRIES + 1):
+                # PowerState is finite: ON, OFF, STANDBY, UNKNOWN.
+                # ON means the device came online (e.g. via push notification) — stop retrying.
+                # OFF/STANDBY/UNKNOWN all mean "keep trying" — the device hasn't woken yet.
+                # Explicit user cancellation (power off during WOL) is handled by
+                # _cancel_wol_task() in send_command, not by state checks here.
+                if self._state == PowerState.ON:
+                    _LOG.info("[%s] WOL: device already ON, stopping retries", self.name)
+                    return {"success": True}
+
                 total_wait = const.WOL_INITIAL_DELAY + (attempt - 1) * const.WOL_RETRY_INTERVAL
                 _LOG.info("[%s] WOL attempt %d/%d (elapsed: %ds)",
                           self.name, attempt, const.WOL_MAX_RETRIES, total_wait)
@@ -1026,6 +1054,12 @@ class MadVRDevice:
                 # repeated nudges to wake from deep standby.
                 self._send_wol_packet(magic_packet)
                 await asyncio.sleep(const.WOL_RETRY_INTERVAL)
+
+            # Final check after last sleep — device may have come online during the wait
+            if await self._is_device_reachable():
+                total_wait = const.WOL_INITIAL_DELAY + const.WOL_MAX_RETRIES * const.WOL_RETRY_INTERVAL
+                _LOG.info("[%s] Wake-on-LAN successful after %ds", self.name, total_wait)
+                return {"success": True}
 
             total_wait = const.WOL_INITIAL_DELAY + const.WOL_MAX_RETRIES * const.WOL_RETRY_INTERVAL
             return {"success": False, "error": f"Device failed to wake after {total_wait}s"}
