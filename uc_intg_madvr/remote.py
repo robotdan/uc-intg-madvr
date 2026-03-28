@@ -55,17 +55,22 @@ class MadVRRemote(Remote):
 
         try:
             if cmd_id == Commands.ON:
-                task = asyncio.create_task(self._device.send_command(const.CMD_STANDBY))
+                task = asyncio.create_task(self._device.send_command(const.CMD_STANDBY, power_intent="on"))
 
                 try:
                     result = await asyncio.wait_for(task, timeout=3.0)
                     return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
                 except asyncio.TimeoutError:
-                    _LOG.info("Power ON command initiated (may take up to 40s for WOL)")
+                    _LOG.info("Power ON command initiated (may take up to 42s for WOL)")
                     return StatusCodes.OK
 
             elif cmd_id == Commands.OFF:
-                result = await self._device.send_command(const.CMD_POWER_OFF)
+                # Use Standby instead of PowerOff for faster wake-up recovery.
+                # PowerOff requires WOL + full boot; Standby wakes instantly via IR/WOL.
+                # send_command handles all state guards (already-off short-circuit, Standby
+                # toggle prevention, reactive recovery for stale state).
+                # Full PowerOff is available via the Power UI page or 'Power Off' simple command.
+                result = await self._device.send_command(const.CMD_STANDBY, power_intent="off")
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
 
             elif cmd_id == Commands.SEND_CMD:
@@ -82,31 +87,46 @@ class MadVRRemote(Remote):
                     _LOG.debug(f"Mapped simple command '{command}' to device command '{device_command}'")
                     command = device_command
 
-                # Check if this is a power-related command that might trigger WOL
-                if command == const.CMD_STANDBY and self._device.state.value == "OFF":
-                    # Handle like Commands.ON
-                    task = asyncio.create_task(self._device.send_command(command))
+                # Standby via send_cmd: if already in standby, device is in desired state
+                if command == const.CMD_STANDBY and self._device.state.value == "STANDBY":
+                    _LOG.info("Device already in standby, command successful")
+                    return StatusCodes.OK
+
+                # Standby when OFF or UNKNOWN: needs WOL (may take a while).
+                # UNKNOWN is treated as OFF because the TCP port is likely closed and
+                # the command would fail anyway. WOL is safe if already on (NIC ignores it).
+                if command == const.CMD_STANDBY and self._device.state.value in ("OFF", "UNKNOWN"):
+                    task = asyncio.create_task(self._device.send_command(command, power_intent="on"))
                     try:
                         result = await asyncio.wait_for(task, timeout=3.0)
                         return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
                     except asyncio.TimeoutError:
                         _LOG.info(f"Command {command} initiated (may involve WOL)")
                         return StatusCodes.OK
-                else:
-                    # Normal command
-                    result = await self._device.send_command(command)
-                    return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
-            else:
-                # Handle simple commands
-                device_command = self._map_simple_command_to_device(cmd_id)
-                if device_command:
-                    result = await self._device.send_command(device_command)
-                    return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
-                else:
-                    _LOG.warning(f"Unknown command: {cmd_id}")
-                    return StatusCodes.NOT_IMPLEMENTED
 
-            await asyncio.sleep(const.COMMAND_DELAY)
+                # Normal command
+                result = await self._device.send_command(command)
+                return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
+            elif cmd_id == Commands.TOGGLE:
+                if self._device.state.value == "ON":
+                    # State guard: send_command handles power_intent="off" correctly
+                    result = await self._device.send_command(const.CMD_STANDBY, power_intent="off")
+                    return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
+                else:
+                    # Device is OFF/STANDBY/UNKNOWN — wake it
+                    task = asyncio.create_task(
+                        self._device.send_command(const.CMD_STANDBY, power_intent="on")
+                    )
+                    try:
+                        result = await asyncio.wait_for(task, timeout=3.0)
+                        return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
+                    except asyncio.TimeoutError:
+                        _LOG.info("Power toggle (ON) initiated (may take up to 42s for WOL)")
+                        return StatusCodes.OK
+
+            else:
+                _LOG.debug(f"Ignoring unsupported command: {cmd_id}")
+                return StatusCodes.OK
 
         except Exception as e:
             _LOG.error(f"Command failed: {e}", exc_info=True)
@@ -200,7 +220,7 @@ class MadVRRemote(Remote):
         items = [
             create_ui_text("Power Control", 0, 0, size=Size(4, 1)),
             create_ui_text("Power On", 0, 1, cmd=Commands.ON),
-            create_ui_text("Power Off", 1, 1, cmd=Commands.OFF),
+            create_ui_text("Power Off", 1, 1, cmd=EntityCommand("send_cmd", {"command": const.CMD_POWER_OFF})),
             create_ui_text("Restart", 2, 1, cmd=EntityCommand("send_cmd", {"command": const.CMD_RESTART})),
             create_ui_text("Reload SW", 3, 1, cmd=EntityCommand("send_cmd", {"command": const.CMD_RELOAD_SOFTWARE})),
         ]

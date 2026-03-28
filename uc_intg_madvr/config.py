@@ -62,20 +62,34 @@ class MadVRConfig:
         return bool(self._config.get("host"))
 
     def set_config(self, host: str, port: int = None, name: str = None) -> None:
-        """Set and save configuration."""
+        """Set and save configuration, preserving polling and MAC fields."""
         if port is None:
             port = const.DEFAULT_PORT
         if name is None:
             name = "madVR Envy"
-            
+
         self._config = {
             "host": host,
             "port": port,
             "name": name,
-            "mac_address": self._config.get("mac_address")
+            "mac_address": self._config.get("mac_address"),
+            "polling_mode": self._config.get("polling_mode", "enabled"),
+            "polling_interval": self._config.get("polling_interval", const.DEFAULT_POLL_INTERVAL),
         }
         self._save_config()
         _LOG.info("Configuration updated: %s:%d", host, port)
+
+    def set_polling_config(self, mode: str, interval: int) -> None:
+        """Set polling configuration."""
+        if mode not in ("enabled", "on_demand", "disabled"):
+            _LOG.warning("Invalid polling mode '%s', defaulting to 'enabled'", mode)
+            mode = "enabled"
+        if interval < const.MIN_POLL_INTERVAL:
+            interval = const.MIN_POLL_INTERVAL
+        self._config["polling_mode"] = mode
+        self._config["polling_interval"] = interval
+        self._save_config()
+        _LOG.info("Polling config updated: mode=%s, interval=%ds", mode, interval)
 
     @property
     def host(self) -> str | None:
@@ -96,6 +110,16 @@ class MadVRConfig:
     def mac_address(self) -> str | None:
         """Get stored MAC address."""
         return self._config.get("mac_address")
+
+    @property
+    def polling_mode(self) -> str:
+        """Get polling mode (enabled, on_demand, disabled). Defaults to enabled for migration."""
+        return self._config.get("polling_mode", "enabled")
+
+    @property
+    def polling_interval(self) -> int:
+        """Get polling interval in seconds. Defaults to 60 for migration."""
+        return self._config.get("polling_interval", const.DEFAULT_POLL_INTERVAL)
 
     def set_mac_address(self, mac_address: str) -> None:
         """Store MAC address."""

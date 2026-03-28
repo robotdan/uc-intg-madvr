@@ -7,6 +7,7 @@ madVR Envy integration driver.
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 import ucapi
@@ -39,16 +40,19 @@ _select: MadVRAspectRatioSelect | None = None
 def _device_state_to_media_player_state(dev_state: PowerState) -> ucapi.media_player.States:
     """
     Convert device power state to media player state.
-    
+
     Mapping:
     - PowerState.ON → States.ON (actively processing video)
-    - PowerState.STANDBY → States.STANDBY (low power, network responsive)
-    - PowerState.OFF → States.OFF (powered off)
+    - PowerState.STANDBY → States.OFF (UI shows ON button to wake; MEDIA_TITLE distinguishes "Standby" from "Powered Off")
+    - PowerState.OFF → States.OFF (powered off, WOL-recoverable)
     - PowerState.UNKNOWN → States.UNKNOWN
     """
+    # STANDBY → OFF is intentional: the madVR Envy closes its TCP port during
+    # standby, making the device unreachable. This differs from some integrations
+    # where standby means "low-power but responsive."
     state_map = {
         PowerState.ON: ucapi.media_player.States.ON,
-        PowerState.STANDBY: ucapi.media_player.States.STANDBY,
+        PowerState.STANDBY: ucapi.media_player.States.OFF,
         PowerState.OFF: ucapi.media_player.States.OFF,
         PowerState.UNKNOWN: ucapi.media_player.States.UNKNOWN,
     }
@@ -58,15 +62,18 @@ def _device_state_to_media_player_state(dev_state: PowerState) -> ucapi.media_pl
 def _device_state_to_remote_state(dev_state: PowerState) -> ucapi.remote.States:
     """
     Convert device power state to remote state.
-    
+
     Mapping:
-    - PowerState.ON or STANDBY → States.ON (device is responsive)
-    - PowerState.OFF → States.OFF (device is not responsive)
+    - PowerState.ON → States.ON (device is responsive, TCP port open)
+    - PowerState.STANDBY or OFF → States.OFF (TCP port closed, unreachable)
     - PowerState.UNKNOWN → States.UNKNOWN
     """
-    if dev_state in (PowerState.ON, PowerState.STANDBY):
+    if dev_state == PowerState.ON:
         return ucapi.remote.States.ON
-    elif dev_state == PowerState.OFF:
+    # STANDBY → OFF is intentional: the madVR Envy closes its TCP port during
+    # standby, making the device unreachable. This differs from some integrations
+    # where standby means "low-power but responsive."
+    elif dev_state in (PowerState.OFF, PowerState.STANDBY):
         return ucapi.remote.States.OFF
     else:
         return ucapi.remote.States.UNKNOWN
@@ -77,17 +84,17 @@ async def on_device_update(identifier: str, update: dict[str, Any] | None) -> No
     if not update:
         return
 
-    _LOG.debug(f"Device update for {identifier}: {update}")
+    _LOG.debug("Device update for %s: %s", identifier, update)
 
     # Handle media player updates
-    if _media_player and identifier == _media_player.id.split('.')[1]:
+    if _media_player and _device and identifier == _device.identifier:
         if api.configured_entities.contains(_media_player.id):
             mp_attributes = {}
 
             if "state" in update:
                 mp_state = _device_state_to_media_player_state(update["state"])
                 mp_attributes[ucapi.media_player.Attributes.STATE] = mp_state
-                _LOG.info(f"Media Player state update: {update['state']} → {mp_state}")
+                _LOG.info("Media Player state update: %s → %s", update["state"], mp_state)
 
             if "signal_info" in update:
                 mp_attributes[ucapi.media_player.Attributes.MEDIA_TITLE] = update["signal_info"]
@@ -96,7 +103,7 @@ async def on_device_update(identifier: str, update: dict[str, Any] | None) -> No
                 api.configured_entities.update_attributes(_media_player.id, mp_attributes)
 
     # Handle remote updates
-    if _remote and identifier == _remote.id.split('.')[1]:
+    if _remote and _device and identifier == _device.identifier:
         if api.configured_entities.contains(_remote.id):
             if "state" in update:
                 remote_state = _device_state_to_remote_state(update["state"])
@@ -136,13 +143,13 @@ async def _initialize_entities():
         _media_player = MadVRMediaPlayer(_config, _device)
         _remote = MadVRRemote(_config, _device)
 
-        # Create sensor entities
+        # Create sensor entities — field order per madVR protocol: GPU, HDMI, CPU, Mainboard
         _sensors = [
             MadVRSignalSensor(_config, _device),
             MadVRTemperatureSensor(_config, _device, 0, "GPU"),
-            MadVRTemperatureSensor(_config, _device, 1, "CPU"),
-            MadVRTemperatureSensor(_config, _device, 2, "Board"),
-            MadVRTemperatureSensor(_config, _device, 3, "PSU"),
+            MadVRTemperatureSensor(_config, _device, 1, "HDMI"),
+            MadVRTemperatureSensor(_config, _device, 2, "CPU"),
+            MadVRTemperatureSensor(_config, _device, 3, "Mainboard"),
             MadVRAspectRatioSensor(_config, _device),
             MadVRMaskingRatioSensor(_config, _device),
         ]
@@ -150,10 +157,10 @@ async def _initialize_entities():
         # Create select entity
         _select = MadVRAspectRatioSelect(_config, _device)
 
-        _LOG.info(f"Media Player features: {_media_player.features}")
-        _LOG.info(f"Remote features: {_remote.features}")
-        _LOG.info(f"Created {len(_sensors)} sensor entities")
-        _LOG.info(f"Created select entity for aspect ratio mode")
+        _LOG.info("Media Player features: %s", _media_player.features)
+        _LOG.info("Remote features: %s", _remote.features)
+        _LOG.info("Created %d sensor entities", len(_sensors))
+        _LOG.info("Created select entity for aspect ratio mode")
 
         api.available_entities.clear()
         api.available_entities.add(_media_player)
@@ -164,30 +171,30 @@ async def _initialize_entities():
 
         api.available_entities.add(_select)
 
-        await _device.start_polling()
+        await _device.start()
 
-        _LOG.info("✓ Entities initialized successfully")
+        _LOG.info("Entities initialized successfully")
         return True
 
     except Exception as e:
-        _LOG.error(f"Failed to initialize entities: {e}", exc_info=True)
+        _LOG.error("Failed to initialize entities: %s", e, exc_info=True)
         return False
 
 
 async def on_setup_complete():
     """Called when setup is complete."""
     _LOG.info("Setup complete - initializing entities")
-    
+
     if await _initialize_entities():
         await api.set_device_state(DeviceStates.CONNECTED)
-        _LOG.info("✓ Device state set to CONNECTED")
+        _LOG.info("Device state set to CONNECTED")
     else:
         await api.set_device_state(DeviceStates.ERROR)
-        _LOG.error("✗ Entity initialization failed")
+        _LOG.error("Entity initialization failed")
 
 
 async def on_connect() -> None:
-    """Handle Remote connection."""
+    """Handle Remote connection. Triggers auto-recovery on reconnect."""
     global _config
 
     _LOG.info("Remote connected")
@@ -206,6 +213,9 @@ async def on_connect() -> None:
     elif not _config.is_configured():
         await api.set_device_state(DeviceStates.DISCONNECTED)
     else:
+        # UC remote reconnected — trigger auto-recovery (reset backoff)
+        if _device:
+            await _device.trigger_reconnect()
         await api.set_device_state(DeviceStates.CONNECTED)
 
 
@@ -214,32 +224,116 @@ async def on_disconnect() -> None:
     _LOG.info("Remote disconnected")
 
 
-async def on_subscribe_entities(entity_ids: list[str]):
-    """Handle entity subscriptions."""
-    _LOG.info(f"Entities subscription requested: {entity_ids}")
+async def on_enter_standby() -> None:
+    """Handle UC Remote entering standby. Suspend device connections."""
+    _LOG.info("UC Remote entering standby")
+    if _device:
+        await _device.suspend()
 
+
+async def on_exit_standby() -> None:
+    """Handle UC Remote exiting standby. Resume device connections."""
+    _LOG.info("UC Remote exiting standby")
+    if _device:
+        await _device.resume()
+
+
+async def on_subscribe_entities(entity_ids: list[str]):
+    """Handle entity subscriptions. Pushes current state for all subscribed entities."""
+    _LOG.info("Entities subscription requested: %s", entity_ids)
+
+    if not _device:
+        return
+
+    temp_on_demand_queried = False
     for entity_id in entity_ids:
         if _media_player and entity_id == _media_player.id:
-            if _device:
-                await _device.update()
+            if api.configured_entities.contains(_media_player.id):
+                mp_state = _device_state_to_media_player_state(_device.state)
+                api.configured_entities.update_attributes(_media_player.id, {
+                    ucapi.media_player.Attributes.STATE: mp_state,
+                    ucapi.media_player.Attributes.MEDIA_TITLE: _device.signal_info,
+                })
+
         elif _remote and entity_id == _remote.id:
-            if _device and api.configured_entities.contains(_remote.id):
-                api.configured_entities.update_attributes(
-                    _remote.id,
-                    {ucapi.remote.Attributes.STATE: _device_state_to_remote_state(_device.state)}
-                )
+            if api.configured_entities.contains(_remote.id):
+                api.configured_entities.update_attributes(_remote.id, {
+                    ucapi.remote.Attributes.STATE: _device_state_to_remote_state(_device.state),
+                })
+
+        elif entity_id.endswith(".signal"):
+            if api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                api.configured_entities.update_attributes(entity_id, {
+                    SensorAttributes.STATE: state,
+                    SensorAttributes.VALUE: _device.signal_info,
+                })
+
+        elif entity_id.endswith(".aspect_ratio"):
+            if api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                api.configured_entities.update_attributes(entity_id, {
+                    SensorAttributes.STATE: state,
+                    SensorAttributes.VALUE: _device.aspect_ratio,
+                })
+
+        elif entity_id.endswith(".masking_ratio"):
+            if api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                api.configured_entities.update_attributes(entity_id, {
+                    SensorAttributes.STATE: state,
+                    SensorAttributes.VALUE: _device.masking_ratio,
+                })
+
+        elif "temp_" in entity_id:
+            if _config and _config.polling_mode == "on_demand":
+                if not temp_on_demand_queried:
+                    temp_on_demand_queried = True
+                    await _device.query_on_demand()
+            elif api.configured_entities.contains(entity_id):
+                from ucapi.sensor import Attributes as SensorAttributes, States as SensorStates
+                state = SensorStates.ON if _device.state == PowerState.ON else SensorStates.UNAVAILABLE
+                temp_names = ["gpu", "hdmi", "cpu", "mainboard"]
+                for idx, name in enumerate(temp_names):
+                    if entity_id.endswith(f".temp_{name}"):
+                        api.configured_entities.update_attributes(entity_id, {
+                            SensorAttributes.STATE: state,
+                            SensorAttributes.VALUE: _device.temperatures[idx],
+                            SensorAttributes.UNIT: "°C",
+                        })
+                        break
+
+        elif _select and entity_id == _select.id:
+            if api.configured_entities.contains(_select.id):
+                from ucapi.select import Attributes as SelectAttributes, States as SelectStates
+                state = SelectStates.ON if _device.state == PowerState.ON else SelectStates.UNAVAILABLE
+                api.configured_entities.update_attributes(_select.id, {
+                    SelectAttributes.STATE: state,
+                    SelectAttributes.CURRENT_OPTION: _device.aspect_ratio_mode,
+                })
 
 
 async def main():
     """Main entry point."""
     global api, _config
 
+    level = os.getenv("UC_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, level, logging.INFO)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     )
 
-    _LOG.info("Starting madVR Envy integration")
+    # Override ucapi library loggers (they hardcode DEBUG)
+    logging.getLogger("ucapi.api").setLevel(log_level)
+    logging.getLogger("ucapi.entities").setLevel(log_level)
+    logging.getLogger("ucapi.entity").setLevel(log_level)
+
+    _LOG.info("Starting madVR Envy integration (log level: %s)", level)
 
     try:
         loop = asyncio.get_running_loop()
@@ -248,6 +342,8 @@ async def main():
         api.listens_to(Events.CONNECT)(on_connect)
         api.listens_to(Events.DISCONNECT)(on_disconnect)
         api.listens_to(Events.SUBSCRIBE_ENTITIES)(on_subscribe_entities)
+        api.listens_to(Events.ENTER_STANDBY)(on_enter_standby)
+        api.listens_to(Events.EXIT_STANDBY)(on_exit_standby)
 
         _config = MadVRConfig()
 
@@ -266,10 +362,10 @@ async def main():
     except asyncio.CancelledError:
         _LOG.info("Driver cancelled")
     except Exception as e:
-        _LOG.error(f"Driver error: {e}", exc_info=True)
+        _LOG.error("Driver error: %s", e, exc_info=True)
     finally:
         if _device:
-            await _device.stop_polling()
+            await _device.stop()
 
 
 if __name__ == "__main__":

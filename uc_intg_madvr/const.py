@@ -8,12 +8,49 @@ Constants for madVR Envy integration.
 DEFAULT_PORT = 44077
 CONNECTION_TIMEOUT = 10.0
 COMMAND_TIMEOUT = 5.0
+
+# Listener heartbeat: keeps persistent notification connection alive.
+# madVR spec closes connections after 60s inactivity; 20s gives good margin.
 HEARTBEAT_INTERVAL = 20.0
 
-POLL_INTERVAL = 10.0
+# Polling for non-pushed data (e.g. temperatures)
+DEFAULT_POLL_INTERVAL = 60
+MIN_POLL_INTERVAL = 10
 
-COMMAND_DELAY = 0.5
-POWER_COMMAND_DELAY = 2.0
+# Command connection closes after this many seconds of no commands
+COMMAND_IDLE_TIMEOUT = 30.0
+
+# Ping task: TCP connect check to detect device power-on
+PING_INTERVAL = 30.0
+
+# After PowerOff/Standby, wait before treating device as connectable again
+POWER_OFF_HYSTERESIS = 30.0
+
+# Restart/ReloadSoftware: brief delay before reconnect attempt
+FAST_RECONNECT_DELAY = 2.0
+
+# Reconnection backoff sequence (seconds)
+BACKOFF_DELAYS = [5, 10, 30, 60]
+
+# Stop retrying after this many seconds total
+MAX_RETRY_DURATION = 1800  # 30 minutes
+
+# Welcome message prefix for connection validation
+WELCOME_PREFIX = "WELCOME to Envy"
+
+# Wake-on-LAN timing: 12s initial delay + 6 retries at 5s intervals = 42s max
+WOL_INITIAL_DELAY = 12
+WOL_MAX_RETRIES = 6
+WOL_RETRY_INTERVAL = 5
+
+# Signal info display strings — used by _teardown_connections, _handle_no_signal,
+# and _sync_state_after_reconnect to set and detect stale signal state.
+SIGNAL_NO_SIGNAL = "No Signal"
+SIGNAL_UNKNOWN = "Unknown"
+SIGNAL_STANDBY = "Standby"
+SIGNAL_POWERED_OFF = "Powered Off"
+SIGNAL_RESTARTING = "Restarting"
+STALE_SIGNALS = frozenset({SIGNAL_UNKNOWN, SIGNAL_STANDBY, SIGNAL_POWERED_OFF, SIGNAL_RESTARTING})
 
 CMD_POWER_OFF = "PowerOff"
 CMD_STANDBY = "Standby"
@@ -67,10 +104,23 @@ AR_2_55 = "2.55:1"
 AR_2_76 = "2.76:1"
 
 CMD_GET_SIGNAL_INFO = "GetIncomingSignalInfo"
+CMD_GET_OUTGOING_SIGNAL_INFO = "GetOutgoingSignalInfo"
 CMD_GET_ASPECT_RATIO = "GetAspectRatio"
 CMD_GET_MASKING_RATIO = "GetMaskingRatio"
 CMD_GET_TEMPERATURES = "GetTemperatures"
 CMD_GET_MAC_ADDRESS = "GetMacAddress"
+
+# Maps query commands to expected response prefixes. Used by the command
+# connection to distinguish the actual response from interleaved push
+# notifications that arrive on all open connections.
+RESPONSE_PREFIX = {
+    CMD_GET_SIGNAL_INFO: ("IncomingSignalInfo", "NoSignal"),
+    CMD_GET_OUTGOING_SIGNAL_INFO: ("OutgoingSignalInfo",),
+    CMD_GET_ASPECT_RATIO: ("AspectRatio",),
+    CMD_GET_MASKING_RATIO: ("MaskingRatio",),
+    CMD_GET_TEMPERATURES: ("Temperatures",),
+    CMD_GET_MAC_ADDRESS: ("MacAddress",),
+}
 
 CMD_TOGGLE = "Toggle"
 TOGGLE_TONE_MAP = "ToneMap"

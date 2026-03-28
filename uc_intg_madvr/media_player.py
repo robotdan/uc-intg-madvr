@@ -13,6 +13,7 @@ from ucapi.media_player import Attributes, Commands, DeviceClasses, Features, Me
 
 from uc_intg_madvr.config import MadVRConfig
 from uc_intg_madvr.device import MadVRDevice
+from uc_intg_madvr import const
 
 _LOG = logging.getLogger(__name__)
 
@@ -52,11 +53,17 @@ class MadVRMediaPlayer(MediaPlayer):
 
         try:
             if cmd_id == Commands.ON:
-                result = await self._device.send_command("Standby")
-                return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
-            
+                # send_command handles WOL in the background and returns immediately
+                await self._device.send_command(const.CMD_STANDBY, power_intent="on")
+                return StatusCodes.OK
+
             elif cmd_id == Commands.OFF:
-                result = await self._device.send_command("Standby")
+                # Use Standby instead of PowerOff for faster wake-up recovery.
+                # PowerOff requires WOL + full boot; Standby wakes instantly via IR/WOL.
+                # send_command handles all state guards (already-off short-circuit, Standby
+                # toggle prevention, reactive recovery for stale state).
+                # Full PowerOff is available via the Power UI page or 'Power Off' simple command.
+                result = await self._device.send_command(const.CMD_STANDBY, power_intent="off")
                 return StatusCodes.OK if result["success"] else StatusCodes.SERVER_ERROR
             
             else:

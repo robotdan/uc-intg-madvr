@@ -90,3 +90,6 @@ version_info.txt
 tools/
 test*
 
+# Claude Code worktrees
+.worktrees/
+
